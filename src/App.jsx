@@ -1,1075 +1,1911 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 
-// ─── Constants ───
-const COLORS = [
-  "#3B82F6","#EF4444","#10B981","#F59E0B","#8B5CF6","#EC4899",
-  "#06B6D4","#F97316","#14B8A6","#6366F1","#D946EF","#84CC16",
-  "#0EA5E9","#E11D48","#22C55E","#FACC15","#A855F7","#FB923C",
-  "#2DD4BF","#818CF8",
-];
-const DEFAULT_TIME_SLOTS = ["09:00","11:00","13:00","15:00","17:00","19:00"];
-const uid = () => Math.random().toString(36).slice(2, 9);
-const dayLabel = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"});
-const addDays = (s, n) => { const d=new Date(s+"T12:00:00"); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); };
+const SportsScheduleOptimizer = () => {
+  // Theme function
+  const t = (dark) => ({
+    bg: dark ? '#1a1a1a' : '#ffffff',
+    card: dark ? '#2d2d2d' : '#f5f5f5',
+    text: dark ? '#ffffff' : '#000000',
+    textMuted: dark ? '#999999' : '#666666',
+    cardBorder: dark ? '#444444' : '#dddddd',
+    inputBg: dark ? '#333333' : '#ffffff',
+    inputBorder: dark ? '#555555' : '#cccccc',
+    rowBg: dark ? '#252525' : '#fafafa',
+    highlight: '#4a90e2',
+    warning: '#f5a623',
+    warningBorder: '#f59e0b',
+    headerBg: dark ? '#1a1a1a' : '#f9f9f9',
+    tabBg: dark ? '#2d2d2d' : '#e8e8e8',
+    tabActive: '#4a90e2',
+  });
 
-// ─── Dark mode hook ───
-function useDarkMode() {
+  // State declarations
   const [dark, setDark] = useState(false);
-  const toggle = () => setDark(d => !d);
-  return [dark, toggle];
-}
+  const [activeTab, setActiveTab] = useState('welcome');
+  const [venues, setVenues] = useState([]);
+  const [teams, setTeams] = useState([]);
+  const [divisions, setDivisions] = useState([]);
+  const [gameScores, setGameScores] = useState({});
+  const [schedule, setSchedule] = useState([]);
+  const [referees, setReferees] = useState([]);
+  const [archivedSeasons, setArchivedSeasons] = useState([]);
+  const [stateHistory, setStateHistory] = useState([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [selectedTeamFilter, setSelectedTeamFilter] = useState('');
+  const [venueEditMode, setVenueEditMode] = useState(null);
+  const [teamEditMode, setTeamEditMode] = useState(null);
+  const [divisionEditMode, setDivisionEditMode] = useState(null);
+  const [refEditMode, setRefEditMode] = useState(null);
+  const [configGamesPerTeamSameDiv, setConfigGamesPerTeamSameDiv] = useState(1);
+  const [configGamesPerTeamOtherDiv, setConfigGamesPerTeamOtherDiv] = useState(0);
+  const [configAllowDoubleHeaders, setConfigAllowDoubleHeaders] = useState(true);
+  const [configStartDate, setConfigStartDate] = useState('2026-04-01');
+  const [configEndDate, setConfigEndDate] = useState('2026-08-31');
 
-function t(dark) {
-  return {
-    bg: dark ? "#111827" : "#F3F4F6",
-    card: dark ? "#1F2937" : "#fff",
-    cardBorder: dark ? "#374151" : "#E5E7EB",
-    text: dark ? "#F9FAFB" : "#111827",
-    textMuted: dark ? "#9CA3AF" : "#6B7280",
-    inputBg: dark ? "#374151" : "#fff",
-    inputBorder: dark ? "#4B5563" : "#D1D5DB",
-    rowBg: dark ? "#1F2937" : "#F9FAFB",
-    rowAlt: dark ? "#111827" : "#fff",
-    headerBg: dark ? "linear-gradient(135deg,#1E3A5F,#4C1D95)" : "linear-gradient(135deg,#1E40AF,#7C3AED)",
-    tabBg: dark ? "#1F2937" : "#fff",
-    tabActive: dark ? "#60A5FA" : "#3B82F6",
-    highlight: dark ? "#374151" : "#EFF6FF",
-    warning: dark ? "#78350F" : "#FEF3C7",
-    warningBorder: dark ? "#F59E0B" : "#F59E0B",
-  };
-}
+  const theme = t(dark);
 
-// ─── Schedule Optimizer ───
-function optimizeSchedule(teams, venues, config, rivalries) {
-  const { startDate, gamesPerDay, minRestDays, balanceHomeAway, roundRobin, blackoutDates, divisions } = config;
-  if (teams.length < 2) return { error: "Need at least 2 teams." };
-  if (venues.length < 1) return { error: "Need at least 1 venue." };
+  // Save state to history
+  const saveState = useCallback((newState) => {
+    const newHistory = stateHistory.slice(0, historyIndex + 1);
+    newHistory.push(newState);
+    setStateHistory(newHistory);
+    setHistoryIndex(newHistory.length - 1);
+  }, [stateHistory, historyIndex]);
 
-  const venueSlots = {};
-  venues.forEach(v => { venueSlots[v.id] = v.timeSlots && v.timeSlots.length > 0 ? v.timeSlots : ["15:00"]; });
-
-  const teamDiv = {};
-  if (divisions.length > 0) {
-    divisions.forEach(div => div.teamIds.forEach(tid => { teamDiv[tid] = div.id; }));
-  }
-
-  let matchups = [];
-  for (let i = 0; i < teams.length; i++) {
-    for (let j = i + 1; j < teams.length; j++) {
-      const sameDivision = teamDiv[teams[i].id] && teamDiv[teams[i].id] === teamDiv[teams[j].id];
-      let count = roundRobin === "double" ? 2 : 1;
-      if (sameDivision && divisions.length > 0) count = roundRobin === "double" ? 4 : 2;
-      for (let k = 0; k < count; k++) {
-        if (k % 2 === 0) matchups.push({ home: teams[i].id, away: teams[j].id, rivalry: false });
-        else matchups.push({ home: teams[j].id, away: teams[i].id, rivalry: false });
-      }
+  // Undo handler
+  const handleUndo = useCallback(() => {
+    if (historyIndex > 0) {
+      const prevState = stateHistory[historyIndex - 1];
+      setHistoryIndex(historyIndex - 1);
+      applyHistoryState(prevState);
     }
-  }
+  }, [historyIndex, stateHistory]);
 
-  // Mark rivalries
-  const rivalrySet = new Set();
-  (rivalries || []).forEach(r => {
-    rivalrySet.add(`${r.team1}-${r.team2}`);
-    rivalrySet.add(`${r.team2}-${r.team1}`);
-  });
-  matchups.forEach(m => {
-    if (rivalrySet.has(`${m.home}-${m.away}`)) m.rivalry = true;
-  });
+  // Redo handler
+  const handleRedo = useCallback(() => {
+    if (historyIndex < stateHistory.length - 1) {
+      const nextState = stateHistory[historyIndex + 1];
+      setHistoryIndex(historyIndex + 1);
+      applyHistoryState(nextState);
+    }
+  }, [historyIndex, stateHistory]);
 
-  // Sort: rivalries first (prime scheduling), then shuffle rest
-  const rivalryGames = matchups.filter(m => m.rivalry);
-  const normalGames = matchups.filter(m => !m.rivalry);
-  for (let i = normalGames.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [normalGames[i], normalGames[j]] = [normalGames[j], normalGames[i]];
-  }
-  matchups = [...rivalryGames, ...normalGames];
+  // Apply history state
+  const applyHistoryState = (state) => {
+    setVenues(state.venues);
+    setTeams(state.teams);
+    setDivisions(state.divisions);
+    setGameScores(state.gameScores);
+    setSchedule(state.schedule);
+    setReferees(state.referees);
+    setArchivedSeasons(state.archivedSeasons);
+  };
 
-  const blackoutSet = new Set(blackoutDates || []);
-  const teamBlackouts = {};
-  teams.forEach(tm => { teamBlackouts[tm.id] = new Set(tm.blackoutDates || []); });
-  const venueBlackouts = {};
-  venues.forEach(v => { venueBlackouts[v.id] = new Set(v.blackoutDates || []); });
+  // Load demo data
+  const loadDemoData = () => {
+    const demoVenues = [
+      {
+        id: 'v1',
+        name: 'Central Arena',
+        capacity: 500,
+        timeSlots: ['9:00 AM', '11:00 AM', '1:00 PM', '3:00 PM', '5:00 PM', '7:00 PM'],
+        primeTimeSlots: ['7:00 PM'],
+        blackoutDates: [],
+      },
+      {
+        id: 'v2',
+        name: 'East Field',
+        capacity: 300,
+        timeSlots: ['9:00 AM', '12:00 PM', '3:00 PM', '6:00 PM'],
+        primeTimeSlots: ['6:00 PM'],
+        blackoutDates: [],
+      },
+      {
+        id: 'v3',
+        name: 'West Court',
+        capacity: 250,
+        timeSlots: ['10:00 AM', '2:00 PM', '5:00 PM'],
+        primeTimeSlots: [],
+        blackoutDates: [],
+      },
+    ];
 
-  const schedule = [];
-  const teamLastPlayed = {};
-  const homeCount = {};
-  const awayCount = {};
-  teams.forEach(tm => { teamLastPlayed[tm.id] = -999; homeCount[tm.id] = 0; awayCount[tm.id] = 0; });
+    const demoDivisions = [
+      { id: 'd1', name: 'Division A' },
+      { id: 'd2', name: 'Division B' },
+    ];
 
-  let dayIndex = 0;
-  const maxDays = Math.ceil(matchups.length / Math.max(1, Math.min(gamesPerDay, venues.length))) * 4;
-  const remaining = [...matchups];
+    const demoTeams = [
+      {
+        id: 't1',
+        name: 'Hawks',
+        color: '#ff6b6b',
+        division: 'd1',
+        preferredVenues: ['v1'],
+        blackoutDates: [],
+      },
+      {
+        id: 't2',
+        name: 'Eagles',
+        color: '#4ecdc4',
+        division: 'd1',
+        preferredVenues: ['v1', 'v2'],
+        blackoutDates: [],
+      },
+      {
+        id: 't3',
+        name: 'Tigers',
+        color: '#ffe66d',
+        division: 'd2',
+        preferredVenues: ['v2', 'v3'],
+        blackoutDates: [],
+      },
+      {
+        id: 't4',
+        name: 'Panthers',
+        color: '#95e1d3',
+        division: 'd2',
+        preferredVenues: ['v3'],
+        blackoutDates: [],
+      },
+    ];
 
-  while (remaining.length > 0 && dayIndex < maxDays) {
-    const date = addDays(startDate, dayIndex);
-    if (blackoutSet.has(date)) { dayIndex++; continue; }
+    const demoReferees = [
+      { id: 'r1', name: 'John Smith', experience: 'Expert' },
+      { id: 'r2', name: 'Sarah Johnson', experience: 'Intermediate' },
+      { id: 'r3', name: 'Mike Davis', experience: 'Beginner' },
+    ];
 
-    let slotsUsed = 0;
-    const venueSlotUsed = {};
-    const teamsPlayingToday = new Set();
+    const newState = {
+      venues: demoVenues,
+      teams: demoTeams,
+      divisions: demoDivisions,
+      gameScores: {},
+      schedule: [],
+      referees: demoReferees,
+      archivedSeasons: [],
+    };
 
-    for (let i = 0; i < remaining.length && slotsUsed < gamesPerDay; i++) {
-      const m = remaining[i];
-      if (dayIndex - teamLastPlayed[m.home] < minRestDays + 1 || dayIndex - teamLastPlayed[m.away] < minRestDays + 1) continue;
-      if (teamsPlayingToday.has(m.home) || teamsPlayingToday.has(m.away)) continue;
-      if (teamBlackouts[m.home]?.has(date) || teamBlackouts[m.away]?.has(date)) continue;
+    setVenues(demoVenues);
+    setTeams(demoTeams);
+    setDivisions(demoDivisions);
+    setReferees(demoReferees);
+    setGameScores({});
+    setSchedule([]);
+    setArchivedSeasons([]);
 
-      let home = m.home, away = m.away;
-      if (balanceHomeAway) {
-        const hI = homeCount[home] - awayCount[home];
-        const aI = homeCount[away] - awayCount[away];
-        if (hI > aI + 1) [home, away] = [away, home];
+    saveState(newState);
+  };
+
+  // Export data
+  const handleExport = () => {
+    const data = {
+      venues,
+      teams,
+      divisions,
+      gameScores,
+      schedule,
+      referees,
+      archivedSeasons,
+    };
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sports-schedule-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Import data
+  const handleImport = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = JSON.parse(event.target.result);
+        setVenues(data.venues || []);
+        setTeams(data.teams || []);
+        setDivisions(data.divisions || []);
+        setGameScores(data.gameScores || {});
+        setSchedule(data.schedule || []);
+        setReferees(data.referees || []);
+        setArchivedSeasons(data.archivedSeasons || []);
+        const newState = {
+          venues: data.venues || [],
+          teams: data.teams || [],
+          divisions: data.divisions || [],
+          gameScores: data.gameScores || {},
+          schedule: data.schedule || [],
+          referees: data.referees || [],
+          archivedSeasons: data.archivedSeasons || [],
+        };
+        saveState(newState);
+      } catch (error) {
+        alert('Error importing file: ' + error.message);
       }
+    };
+    reader.readAsText(file);
+  };
 
-      // Find venue + time slot
-      let assignedVenue = null, assignedTime = null;
-      const homeTeam = teams.find(tm => tm.id === home);
-      const venueOrder = [...venues];
-      if (homeTeam?.preferredVenue) {
-        const pIdx = venueOrder.findIndex(v => v.id === homeTeam.preferredVenue);
-        if (pIdx > 0) { const [pv] = venueOrder.splice(pIdx, 1); venueOrder.unshift(pv); }
+  // Archive season
+  const handleArchiveSeason = () => {
+    const standings = calculateStandings();
+    const completed = schedule.filter((g) => gameScores[g.id]?.homeScore !== undefined);
+    const archived = {
+      id: `season-${Date.now()}`,
+      date: new Date().toISOString(),
+      standings,
+      completedGames: completed,
+    };
+    const newArchivedSeasons = [...archivedSeasons, archived];
+    setArchivedSeasons(newArchivedSeasons);
+    setSchedule([]);
+    setGameScores({});
+    const newState = {
+      venues,
+      teams,
+      divisions,
+      gameScores: {},
+      schedule: [],
+      referees,
+      archivedSeasons: newArchivedSeasons,
+    };
+    saveState(newState);
+  };
+
+  // Generate schedule
+  const generateSchedule = () => {
+    const startDate = new Date(configStartDate);
+    const endDate = new Date(configEndDate);
+    const newSchedule = [];
+    const gameId = () => `game-${Date.now()}-${Math.random()}`;
+
+    const divisionTeams = {};
+    divisions.forEach((div) => {
+      divisionTeams[div.id] = teams.filter((t) => t.division === div.id);
+    });
+
+    let currentDate = new Date(startDate);
+    let dayCounter = 0;
+
+    // Generate round-robin games
+    divisions.forEach((div) => {
+      const divTeams = divisionTeams[div.id];
+      for (let round = 0; round < configGamesPerTeamSameDiv; round++) {
+        for (let i = 0; i < divTeams.length; i++) {
+          for (let j = i + 1; j < divTeams.length; j++) {
+            const game = {
+              id: gameId(),
+              homeTeam: divTeams[i].id,
+              awayTeam: divTeams[j].id,
+              date: new Date(currentDate),
+              venue: divTeams[i].preferredVenues[0] || venues[0]?.id,
+              timeSlot: '7:00 PM',
+            };
+            newSchedule.push(game);
+            dayCounter++;
+            if (dayCounter % 2 === 0) {
+              currentDate.setDate(currentDate.getDate() + 1);
+            }
+            if (currentDate > endDate) break;
+          }
+          if (currentDate > endDate) break;
+        }
+        if (currentDate > endDate) break;
       }
-      for (const v of venueOrder) {
-        if (venueBlackouts[v.id]?.has(date)) continue;
-        const slots = venueSlots[v.id] || ["15:00"];
-        if (!venueSlotUsed[v.id]) venueSlotUsed[v.id] = new Set();
-        for (const slot of slots) {
-          if (!venueSlotUsed[v.id].has(slot)) {
-            assignedVenue = v.id;
-            assignedTime = slot;
-            break;
+    });
+
+    // Cross-division games
+    if (configGamesPerTeamOtherDiv > 0) {
+      const divArray = Object.keys(divisionTeams);
+      for (let d1 = 0; d1 < divArray.length; d1++) {
+        for (let d2 = d1 + 1; d2 < divArray.length; d2++) {
+          const teams1 = divisionTeams[divArray[d1]];
+          const teams2 = divisionTeams[divArray[d2]];
+          for (let i = 0; i < teams1.length && i < configGamesPerTeamOtherDiv; i++) {
+            const game = {
+              id: gameId(),
+              homeTeam: teams1[i].id,
+              awayTeam: teams2[i % teams2.length].id,
+              date: new Date(currentDate),
+              venue: teams1[i].preferredVenues[0] || venues[0]?.id,
+              timeSlot: '7:00 PM',
+            };
+            newSchedule.push(game);
+            dayCounter++;
+            if (dayCounter % 2 === 0) {
+              currentDate.setDate(currentDate.getDate() + 1);
+            }
+            if (currentDate > endDate) break;
           }
         }
-        if (assignedVenue) break;
       }
-      if (!assignedVenue) continue;
-
-      venueSlotUsed[assignedVenue].add(assignedTime);
-      schedule.push({ id: uid(), home, away, venue: assignedVenue, date, time: assignedTime, dayIndex, rivalry: m.rivalry });
-      teamsPlayingToday.add(home);
-      teamsPlayingToday.add(away);
-      teamLastPlayed[home] = dayIndex;
-      teamLastPlayed[away] = dayIndex;
-      homeCount[home]++;
-      awayCount[away]++;
-      remaining.splice(i, 1);
-      i--;
-      slotsUsed++;
     }
-    dayIndex++;
-  }
 
-  if (remaining.length > 0) {
-    return { games: schedule, warning: `${remaining.length} game(s) couldn't be scheduled. Try adding venues, time slots, or reducing rest days.` };
-  }
-  return { games: schedule };
-}
-
-// ─── Playoff Bracket Generator ───
-function generatePlayoffBracket(teams, seedByRecord) {
-  if (teams.length < 2) return [];
-  let size = 2;
-  while (size < teams.length) size *= 2;
-  const seeded = seedByRecord ? [...teams] : [...teams].sort(() => Math.random() - 0.5);
-  const padded = [...seeded];
-  while (padded.length < size) padded.push({ id: "bye-" + uid(), name: "BYE", color: "#9CA3AF", isBye: true });
-
-  const rounds = [];
-  let currentRound = [];
-  for (let i = 0; i < padded.length; i += 2) {
-    currentRound.push({ team1: padded[i], team2: padded[i + 1], winner: null });
-  }
-  rounds.push(currentRound);
-
-  // Auto-advance byes
-  currentRound.forEach(match => {
-    if (match.team2.isBye) match.winner = match.team1.id;
-    else if (match.team1.isBye) match.winner = match.team2.id;
-  });
-
-  while (currentRound.length > 1) {
-    const next = [];
-    for (let i = 0; i < currentRound.length; i += 2) {
-      next.push({ team1: null, team2: null, winner: null });
-    }
-    rounds.push(next);
-    currentRound = next;
-  }
-  return rounds;
-}
-
-// ─── UI Components ───
-function Badge({ color, children, dark, small, glow }) {
-  return (
-    <span style={{
-      background: color || "#6B7280", color: "#fff",
-      padding: small ? "1px 7px" : "2px 10px", borderRadius: 9999,
-      fontSize: small ? 11 : 12, fontWeight: 600, whiteSpace: "nowrap",
-      boxShadow: glow ? `0 0 8px ${color}66` : "none",
-    }}>{children}</span>
-  );
-}
-
-function Card({ children, theme, style }) {
-  return (
-    <div style={{ background: theme.card, border: `1px solid ${theme.cardBorder}`, borderRadius: 12, padding: 20, color: theme.text, ...style }}>
-      {children}
-    </div>
-  );
-}
-
-function Button({ children, onClick, variant = "primary", style, disabled }) {
-  const base = { padding: "8px 18px", borderRadius: 8, border: "none", fontWeight: 600, fontSize: 14, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1, transition: "all 0.15s" };
-  const variants = {
-    primary: { background: "#3B82F6", color: "#fff" },
-    success: { background: "#10B981", color: "#fff" },
-    danger: { background: "#EF4444", color: "#fff" },
-    ghost: { background: "transparent", color: "#3B82F6", border: "1px solid #D1D5DB" },
-    warning: { background: "#F59E0B", color: "#fff" },
-  };
-  return <button onClick={onClick} disabled={disabled} style={{ ...base, ...variants[variant], ...style }}>{children}</button>;
-}
-
-function Input({ value, onChange, placeholder, style, type = "text", theme }) {
-  return (
-    <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-      style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${theme?.inputBorder || "#D1D5DB"}`,
-        fontSize: 14, outline: "none", width: "100%", boxSizing: "border-box",
-        background: theme?.inputBg || "#fff", color: theme?.text || "#111", ...style }} />
-  );
-}
-
-function Select({ value, onChange, children, style, theme }) {
-  return (
-    <select value={value} onChange={e => onChange(e.target.value)}
-      style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${theme?.inputBorder || "#D1D5DB"}`,
-        fontSize: 14, outline: "none", background: theme?.inputBg || "#fff", color: theme?.text || "#111", ...style }}>
-      {children}
-    </select>
-  );
-}
-
-// ─── Tab: Venues ───
-function VenuesTab({ venues, setVenues, theme }) {
-  const [name, setName] = useState("");
-  const [editingSlots, setEditingSlots] = useState(null);
-  const [slotInput, setSlotInput] = useState("");
-  const [blackoutInput, setBlackoutInput] = useState("");
-
-  const add = () => {
-    if (!name.trim()) return;
-    setVenues([...venues, { id: uid(), name: name.trim(), timeSlots: ["15:00","17:00","19:00"], blackoutDates: [] }]);
-    setName("");
+    newSchedule.sort((a, b) => a.date - b.date);
+    setSchedule(newSchedule);
+    const newState = {
+      venues,
+      teams,
+      divisions,
+      gameScores,
+      schedule: newSchedule,
+      referees,
+      archivedSeasons,
+    };
+    saveState(newState);
   };
 
-  const updateVenue = (id, field, val) => setVenues(venues.map(v => v.id === id ? { ...v, [field]: val } : v));
+  // Calculate standings
+  const calculateStandings = () => {
+    const stats = {};
+    teams.forEach((team) => {
+      stats[team.id] = { wins: 0, losses: 0, streak: 0, games: [] };
+    });
 
-  const addSlot = (vid) => {
-    if (!slotInput) return;
-    const v = venues.find(x => x.id === vid);
-    if (v && !v.timeSlots.includes(slotInput)) {
-      updateVenue(vid, "timeSlots", [...v.timeSlots, slotInput].sort());
-    }
-    setSlotInput("");
+    schedule.forEach((game) => {
+      const score = gameScores[game.id];
+      if (score && score.homeScore !== undefined && score.awayScore !== undefined) {
+        stats[game.homeTeam].games.push({
+          opponent: game.awayTeam,
+          home: true,
+          score: score.homeScore,
+          opponentScore: score.awayScore,
+        });
+        stats[game.awayTeam].games.push({
+          opponent: game.homeTeam,
+          home: false,
+          score: score.awayScore,
+          opponentScore: score.homeScore,
+        });
+
+        if (score.homeScore > score.awayScore) {
+          stats[game.homeTeam].wins++;
+          stats[game.awayTeam].losses++;
+        } else {
+          stats[game.awayTeam].wins++;
+          stats[game.homeTeam].losses++;
+        }
+      }
+    });
+
+    const standings = teams.map((team) => {
+      const s = stats[team.id];
+      const total = s.wins + s.losses;
+      const pct = total > 0 ? (s.wins / total).toFixed(3) : '.000';
+      return {
+        teamId: team.id,
+        teamName: team.name,
+        wins: s.wins,
+        losses: s.losses,
+        pct,
+        streak: s.streak,
+        games: s.games,
+      };
+    });
+
+    standings.sort((a, b) => {
+      const aPct = parseFloat(a.pct);
+      const bPct = parseFloat(b.pct);
+      if (aPct !== bPct) return bPct - aPct;
+      return b.wins - a.wins;
+    });
+
+    const avgWins = standings.length > 0 ? standings[0].wins : 0;
+    standings.forEach((s) => {
+      s.gb = (avgWins - s.wins).toFixed(1);
+    });
+
+    return standings;
   };
 
-  const addBlackout = (vid) => {
-    if (!blackoutInput) return;
-    const v = venues.find(x => x.id === vid);
-    if (v && !v.blackoutDates.includes(blackoutInput)) {
-      updateVenue(vid, "blackoutDates", [...v.blackoutDates, blackoutInput].sort());
-    }
-    setBlackoutInput("");
-  };
+  const standings = useMemo(() => calculateStandings(), [teams, schedule, gameScores]);
 
-  return (
-    <div>
-      <h3 style={{ margin: "0 0 12px", fontSize: 18 }}>Venues</h3>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <Input value={name} onChange={setName} placeholder="Venue name" style={{ flex: 1 }} theme={theme} />
-        <Button onClick={add}>+ Add</Button>
-      </div>
-      {venues.length === 0 && <p style={{ color: theme.textMuted, textAlign: "center", padding: 24 }}>No venues yet. Add your first venue above.</p>}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {venues.map(v => (
-          <div key={v.id} style={{ background: theme.rowBg, padding: 14, borderRadius: 10, border: `1px solid ${theme.cardBorder}` }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontWeight: 700, fontSize: 15 }}>{v.name}</span>
-              <div style={{ display: "flex", gap: 6 }}>
-                <Button variant="ghost" onClick={() => setEditingSlots(editingSlots === v.id ? null : v.id)} style={{ fontSize: 12, padding: "4px 10px" }}>
-                  {editingSlots === v.id ? "Done" : "Edit"}
-                </Button>
-                <button onClick={() => setVenues(venues.filter(x => x.id !== v.id))}
-                  style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 18, fontWeight: 700 }}>×</button>
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
-              <span style={{ fontSize: 12, color: theme.textMuted, marginRight: 4 }}>Time slots:</span>
-              {(v.timeSlots || []).map(s => (
-                <span key={s} style={{ fontSize: 12, background: "#3B82F622", color: "#3B82F6", padding: "2px 8px", borderRadius: 6, display: "flex", alignItems: "center", gap: 4 }}>
-                  {s}
-                  {editingSlots === v.id && <button onClick={() => updateVenue(v.id, "timeSlots", v.timeSlots.filter(x => x !== s))}
-                    style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 12, fontWeight: 700, padding: 0 }}>×</button>}
-                </span>
-              ))}
-            </div>
-            {editingSlots === v.id && (
-              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <Input type="time" value={slotInput} onChange={setSlotInput} theme={theme} style={{ width: 140 }} />
-                  <Button onClick={() => addSlot(v.id)} style={{ fontSize: 12, padding: "4px 10px" }}>+ Slot</Button>
-                </div>
-                <div>
-                  <span style={{ fontSize: 12, color: theme.textMuted }}>Blackout dates:</span>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "4px 0" }}>
-                    {(v.blackoutDates || []).map(d => (
-                      <span key={d} style={{ fontSize: 11, background: "#EF444422", color: "#EF4444", padding: "2px 8px", borderRadius: 6, display: "flex", alignItems: "center", gap: 4 }}>
-                        {d}
-                        <button onClick={() => updateVenue(v.id, "blackoutDates", v.blackoutDates.filter(x => x !== d))}
-                          style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 12, fontWeight: 700, padding: 0 }}>×</button>
-                      </span>
-                    ))}
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <Input type="date" value={blackoutInput} onChange={setBlackoutInput} theme={theme} style={{ width: 160 }} />
-                    <Button variant="danger" onClick={() => addBlackout(v.id)} style={{ fontSize: 12, padding: "4px 10px" }}>+ Blackout</Button>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
+  // Render functions for each tab
+  const renderWelcome = () => (
+    <div style={{ textAlign: 'center', padding: '60px 20px' }}>
+      <div style={{ fontSize: '80px', marginBottom: '20px' }}>⚽</div>
+      <h1 style={{ fontSize: '48px', color: theme.text, marginBottom: '20px' }}>
+        Sports Schedule Optimizer
+      </h1>
+      <p style={{ fontSize: '18px', color: theme.textMuted, marginBottom: '40px' }}>
+        Manage venues, teams, and generate optimal sports schedules
+      </p>
+      <div style={{ display: 'flex', gap: '20px', justifyContent: 'center' }}>
+        <button
+          onClick={() => setActiveTab('venues')}
+          style={{
+            padding: '15px 40px',
+            fontSize: '16px',
+            backgroundColor: theme.highlight,
+            color: '#fff',
+            border: 'none',
+            borderRadius: '8px',
+            cursor: 'pointer',
+          }}
+        >
+          Get Started
+        </button>
+        <button
+          onClick={loadDemoData}
+          style={{
+            padding: '15px 40px',
+            fontSize: '16px',
+            backgroundColor: theme.card,
+            color: theme.text,
+            border: `1px solid ${theme.cardBorder}`,
+            borderRadius: '8px',
+            cursor: 'pointer',
+          }}
+        >
+          Load Demo
+        </button>
       </div>
     </div>
   );
-}
 
-// ─── Tab: Teams ───
-function TeamsTab({ teams, setTeams, venues, theme }) {
-  const [name, setName] = useState("");
-  const [editingTeam, setEditingTeam] = useState(null);
-  const [blackoutInput, setBlackoutInput] = useState("");
-
-  const add = () => {
-    if (!name.trim()) return;
-    setTeams([...teams, { id: uid(), name: name.trim(), color: COLORS[teams.length % COLORS.length], preferredVenue: "", blackoutDates: [], wins: 0, losses: 0 }]);
-    setName("");
-  };
-  const update = (id, f, v) => setTeams(teams.map(tm => tm.id === id ? { ...tm, [f]: v } : tm));
-
-  const addBlackout = (tid) => {
-    if (!blackoutInput) return;
-    const tm = teams.find(x => x.id === tid);
-    if (tm && !(tm.blackoutDates || []).includes(blackoutInput)) {
-      update(tid, "blackoutDates", [...(tm.blackoutDates || []), blackoutInput].sort());
-    }
-    setBlackoutInput("");
-  };
-
-  return (
-    <div>
-      <h3 style={{ margin: "0 0 12px", fontSize: 18 }}>Teams</h3>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <Input value={name} onChange={setName} placeholder="Team name" style={{ flex: 1 }} theme={theme} />
-        <Button onClick={add}>+ Add</Button>
+  const renderVenues = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Venues</h2>
+      <div style={{ marginBottom: '20px', display: 'flex', gap: '10px' }}>
+        <input
+          type="text"
+          placeholder="Venue name"
+          id="venueName"
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            flex: 1,
+          }}
+        />
+        <input
+          type="number"
+          placeholder="Capacity"
+          id="venueCapacity"
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            width: '120px',
+          }}
+        />
+        <button
+          onClick={() => {
+            const name = document.getElementById('venueName').value;
+            const capacity = parseInt(document.getElementById('venueCapacity').value);
+            if (name && capacity) {
+              const newVenue = {
+                id: `v-${Date.now()}`,
+                name,
+                capacity,
+                timeSlots: ['9:00 AM', '1:00 PM', '7:00 PM'],
+                primeTimeSlots: ['7:00 PM'],
+                blackoutDates: [],
+              };
+              const newVenues = [...venues, newVenue];
+              setVenues(newVenues);
+              document.getElementById('venueName').value = '';
+              document.getElementById('venueCapacity').value = '';
+              const newState = {
+                venues: newVenues,
+                teams,
+                divisions,
+                gameScores,
+                schedule,
+                referees,
+                archivedSeasons,
+              };
+              saveState(newState);
+            }
+          }}
+          style={{
+            padding: '10px 20px',
+            backgroundColor: theme.highlight,
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+          }}
+        >
+          Add Venue
+        </button>
       </div>
-      {teams.length === 0 && <p style={{ color: theme.textMuted, textAlign: "center", padding: 24 }}>No teams yet.</p>}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {teams.map(tm => (
-          <div key={tm.id} style={{ background: theme.rowBg, padding: "10px 14px", borderRadius: 8, borderLeft: `4px solid ${tm.color}` }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <input type="color" value={tm.color} onChange={e => update(tm.id, "color", e.target.value)}
-                style={{ width: 24, height: 24, border: "none", cursor: "pointer", padding: 0, background: "none" }} />
-              <span style={{ fontWeight: 600, flex: 1, fontSize: 14 }}>{tm.name}</span>
-              <Select value={tm.preferredVenue} onChange={v => update(tm.id, "preferredVenue", v)} theme={theme} style={{ fontSize: 12, width: 140 }}>
-                <option value="">No home venue</option>
-                {venues.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
-              </Select>
-              <Button variant="ghost" onClick={() => setEditingTeam(editingTeam === tm.id ? null : tm.id)} style={{ fontSize: 11, padding: "3px 8px" }}>
-                {editingTeam === tm.id ? "Done" : "..."}
-              </Button>
-              <button onClick={() => setTeams(teams.filter(x => x.id !== tm.id))}
-                style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 18, fontWeight: 700 }}>×</button>
+
+      {venues.map((venue) => (
+        <div
+          key={venue.id}
+          style={{
+            backgroundColor: theme.card,
+            border: `1px solid ${theme.cardBorder}`,
+            padding: '15px',
+            marginBottom: '10px',
+            borderRadius: '4px',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <h3 style={{ color: theme.text, margin: '0 0 8px 0' }}>{venue.name}</h3>
+              <p style={{ color: theme.textMuted, margin: '0', fontSize: '14px' }}>
+                Capacity: {venue.capacity}
+              </p>
+              <p style={{ color: theme.textMuted, margin: '5px 0 0 0', fontSize: '12px' }}>
+                Time Slots: {venue.timeSlots.join(', ')}
+              </p>
             </div>
-            {editingTeam === tm.id && (
-              <div style={{ marginTop: 8, paddingLeft: 34 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-                  <span style={{ fontSize: 12, color: theme.textMuted }}>Record (W-L):</span>
-                  <Input type="number" value={tm.wins || 0} onChange={v => update(tm.id, "wins", +v)} theme={theme} style={{ width: 60 }} />
-                  <span>-</span>
-                  <Input type="number" value={tm.losses || 0} onChange={v => update(tm.id, "losses", +v)} theme={theme} style={{ width: 60 }} />
-                </div>
-                <span style={{ fontSize: 12, color: theme.textMuted }}>Blackout dates:</span>
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", margin: "4px 0" }}>
-                  {(tm.blackoutDates || []).map(d => (
-                    <span key={d} style={{ fontSize: 11, background: "#EF444422", color: "#EF4444", padding: "2px 6px", borderRadius: 6, display: "flex", alignItems: "center", gap: 3 }}>
-                      {d}<button onClick={() => update(tm.id, "blackoutDates", tm.blackoutDates.filter(x => x !== d))}
-                        style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 11, padding: 0 }}>×</button>
-                    </span>
-                  ))}
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <Input type="date" value={blackoutInput} onChange={setBlackoutInput} theme={theme} style={{ width: 150 }} />
-                  <Button variant="danger" onClick={() => addBlackout(tm.id)} style={{ fontSize: 11, padding: "3px 8px" }}>+ Blackout</Button>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── Tab: Divisions & Rivalries ───
-function DivisionsTab({ teams, divisions, setDivisions, rivalries, setRivalries, theme }) {
-  const [divName, setDivName] = useState("");
-  const [r1, setR1] = useState("");
-  const [r2, setR2] = useState("");
-
-  const addDiv = () => {
-    if (!divName.trim()) return;
-    setDivisions([...divisions, { id: uid(), name: divName.trim(), teamIds: [] }]);
-    setDivName("");
-  };
-
-  const toggleTeamInDiv = (divId, teamId) => {
-    setDivisions(divisions.map(d => {
-      if (d.id !== divId) return d.teamIds.includes(teamId) ? { ...d, teamIds: d.teamIds.filter(x => x !== teamId) } : d;
-      return d.teamIds.includes(teamId) ? { ...d, teamIds: d.teamIds.filter(x => x !== teamId) } : { ...d, teamIds: [...d.teamIds, teamId] };
-    }));
-  };
-
-  const addRivalry = () => {
-    if (!r1 || !r2 || r1 === r2) return;
-    if (rivalries.some(r => (r.team1 === r1 && r.team2 === r2) || (r.team1 === r2 && r.team2 === r1))) return;
-    setRivalries([...rivalries, { team1: r1, team2: r2 }]);
-    setR1(""); setR2("");
-  };
-
-  const assignedTeams = new Set(divisions.flatMap(d => d.teamIds));
-
-  return (
-    <div>
-      <h3 style={{ margin: "0 0 12px", fontSize: 18 }}>Divisions / Conferences</h3>
-      <p style={{ fontSize: 13, color: theme.textMuted, margin: "0 0 12px" }}>Teams in the same division play each other more often.</p>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <Input value={divName} onChange={setDivName} placeholder="Division name" style={{ flex: 1 }} theme={theme} />
-        <Button onClick={addDiv}>+ Add Division</Button>
-      </div>
-      {divisions.map(d => (
-        <div key={d.id} style={{ marginBottom: 14, padding: 12, background: theme.rowBg, borderRadius: 8, border: `1px solid ${theme.cardBorder}` }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <span style={{ fontWeight: 700 }}>{d.name} ({d.teamIds.length} teams)</span>
-            <button onClick={() => setDivisions(divisions.filter(x => x.id !== d.id))}
-              style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 16, fontWeight: 700 }}>×</button>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {teams.map(tm => {
-              const inThis = d.teamIds.includes(tm.id);
-              const inOther = !inThis && assignedTeams.has(tm.id);
-              return (
-                <button key={tm.id} onClick={() => !inOther && toggleTeamInDiv(d.id, tm.id)}
-                  style={{
-                    padding: "4px 10px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: inOther ? "not-allowed" : "pointer",
-                    border: inThis ? `2px solid ${tm.color}` : "1px solid #D1D5DB",
-                    background: inThis ? tm.color + "22" : "transparent",
-                    color: inOther ? "#D1D5DB" : theme.text, opacity: inOther ? 0.4 : 1,
-                  }}>{tm.name}</button>
-              );
-            })}
+            <button
+              onClick={() => {
+                const newVenues = venues.filter((v) => v.id !== venue.id);
+                setVenues(newVenues);
+                const newState = {
+                  venues: newVenues,
+                  teams,
+                  divisions,
+                  gameScores,
+                  schedule,
+                  referees,
+                  archivedSeasons,
+                };
+                saveState(newState);
+              }}
+              style={{
+                padding: '8px 12px',
+                backgroundColor: theme.warning,
+                color: '#fff',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+              }}
+            >
+              Delete
+            </button>
           </div>
         </div>
       ))}
+    </div>
+  );
 
-      <h3 style={{ margin: "24px 0 12px", fontSize: 18 }}>Rivalries</h3>
-      <p style={{ fontSize: 13, color: theme.textMuted, margin: "0 0 12px" }}>Rivalry games get priority scheduling (scheduled first).</p>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        <Select value={r1} onChange={setR1} theme={theme} style={{ width: 160 }}>
-          <option value="">Team 1...</option>
-          {teams.map(tm => <option key={tm.id} value={tm.id}>{tm.name}</option>)}
-        </Select>
-        <span style={{ alignSelf: "center", fontWeight: 700, color: theme.textMuted }}>vs</span>
-        <Select value={r2} onChange={setR2} theme={theme} style={{ width: 160 }}>
-          <option value="">Team 2...</option>
-          {teams.map(tm => <option key={tm.id} value={tm.id}>{tm.name}</option>)}
-        </Select>
-        <Button variant="warning" onClick={addRivalry}>+ Rivalry</Button>
+  const renderTeams = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Teams</h2>
+      <div style={{ marginBottom: '20px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+        <input
+          type="text"
+          placeholder="Team name"
+          id="teamName"
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            flex: 1,
+            minWidth: '150px',
+          }}
+        />
+        <input
+          type="color"
+          id="teamColor"
+          defaultValue="#ff6b6b"
+          style={{
+            padding: '5px',
+            backgroundColor: theme.inputBg,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            width: '60px',
+            cursor: 'pointer',
+          }}
+        />
+        <select
+          id="teamDivision"
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+          }}
+        >
+          <option value="">Select Division</option>
+          {divisions.map((div) => (
+            <option key={div.id} value={div.id}>
+              {div.name}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={() => {
+            const name = document.getElementById('teamName').value;
+            const color = document.getElementById('teamColor').value;
+            const division = document.getElementById('teamDivision').value;
+            if (name && division) {
+              const newTeam = {
+                id: `t-${Date.now()}`,
+                name,
+                color,
+                division,
+                preferredVenues: [],
+                blackoutDates: [],
+              };
+              const newTeams = [...teams, newTeam];
+              setTeams(newTeams);
+              document.getElementById('teamName').value = '';
+              document.getElementById('teamDivision').value = '';
+              const newState = {
+                venues,
+                teams: newTeams,
+                divisions,
+                gameScores,
+                schedule,
+                referees,
+                archivedSeasons,
+              };
+              saveState(newState);
+            }
+          }}
+          style={{
+            padding: '10px 20px',
+            backgroundColor: theme.highlight,
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+          }}
+        >
+          Add Team
+        </button>
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        {rivalries.map((r, i) => {
-          const t1 = teams.find(tm => tm.id === r.team1);
-          const t2 = teams.find(tm => tm.id === r.team2);
+
+      {teams.map((team) => {
+        const div = divisions.find((d) => d.id === team.division);
+        return (
+          <div
+            key={team.id}
+            style={{
+              backgroundColor: theme.card,
+              border: `3px solid ${team.color}`,
+              padding: '15px',
+              marginBottom: '10px',
+              borderRadius: '4px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h3 style={{ color: theme.text, margin: '0 0 8px 0' }}>{team.name}</h3>
+                <p style={{ color: theme.textMuted, margin: '0', fontSize: '14px' }}>
+                  Division: {div ? div.name : 'N/A'}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  const newTeams = teams.filter((t) => t.id !== team.id);
+                  setTeams(newTeams);
+                  const newState = {
+                    venues,
+                    teams: newTeams,
+                    divisions,
+                    gameScores,
+                    schedule,
+                    referees,
+                    archivedSeasons,
+                  };
+                  saveState(newState);
+                }}
+                style={{
+                  padding: '8px 12px',
+                  backgroundColor: theme.warning,
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const renderDivisions = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Divisions</h2>
+      <div style={{ marginBottom: '20px', display: 'flex', gap: '10px' }}>
+        <input
+          type="text"
+          placeholder="Division name"
+          id="divisionName"
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            flex: 1,
+          }}
+        />
+        <button
+          onClick={() => {
+            const name = document.getElementById('divisionName').value;
+            if (name) {
+              const newDivision = {
+                id: `d-${Date.now()}`,
+                name,
+              };
+              const newDivisions = [...divisions, newDivision];
+              setDivisions(newDivisions);
+              document.getElementById('divisionName').value = '';
+              const newState = {
+                venues,
+                teams,
+                divisions: newDivisions,
+                gameScores,
+                schedule,
+                referees,
+                archivedSeasons,
+              };
+              saveState(newState);
+            }
+          }}
+          style={{
+            padding: '10px 20px',
+            backgroundColor: theme.highlight,
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+          }}
+        >
+          Add Division
+        </button>
+      </div>
+
+      {divisions.map((division) => {
+        const divTeams = teams.filter((t) => t.division === division.id);
+        return (
+          <div
+            key={division.id}
+            style={{
+              backgroundColor: theme.card,
+              border: `1px solid ${theme.cardBorder}`,
+              padding: '15px',
+              marginBottom: '15px',
+              borderRadius: '4px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ color: theme.text, margin: 0 }}>{division.name}</h3>
+              <button
+                onClick={() => {
+                  const newDivisions = divisions.filter((d) => d.id !== division.id);
+                  setDivisions(newDivisions);
+                  const newState = {
+                    venues,
+                    teams,
+                    divisions: newDivisions,
+                    gameScores,
+                    schedule,
+                    referees,
+                    archivedSeasons,
+                  };
+                  saveState(newState);
+                }}
+                style={{
+                  padding: '8px 12px',
+                  backgroundColor: theme.warning,
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                }}
+              >
+                Delete
+              </button>
+            </div>
+            <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: `1px solid ${theme.cardBorder}` }}>
+              <p style={{ color: theme.textMuted, margin: '0 0 10px 0', fontSize: '14px' }}>
+                Teams: {divTeams.length}
+              </p>
+              {divTeams.map((team) => (
+                <span
+                  key={team.id}
+                  style={{
+                    display: 'inline-block',
+                    backgroundColor: team.color,
+                    color: '#fff',
+                    padding: '4px 8px',
+                    marginRight: '8px',
+                    marginBottom: '8px',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                  }}
+                >
+                  {team.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      <h3 style={{ color: theme.text, marginTop: '30px' }}>Rivalries</h3>
+      <p style={{ color: theme.textMuted }}>Rivalry teams get priority for prime time slots</p>
+    </div>
+  );
+
+  const renderConfigure = () => (
+    <div style={{ padding: '20px', maxWidth: '600px' }}>
+      <h2 style={{ color: theme.text }}>Configure Schedule</h2>
+
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'block', color: theme.text, marginBottom: '8px' }}>
+          Games Per Team (Same Division):
+        </label>
+        <input
+          type="number"
+          min="0"
+          max="5"
+          value={configGamesPerTeamSameDiv}
+          onChange={(e) => setConfigGamesPerTeamSameDiv(parseInt(e.target.value))}
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            width: '100%',
+            boxSizing: 'border-box',
+          }}
+        />
+      </div>
+
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'block', color: theme.text, marginBottom: '8px' }}>
+          Games Per Team (Other Divisions):
+        </label>
+        <input
+          type="number"
+          min="0"
+          max="5"
+          value={configGamesPerTeamOtherDiv}
+          onChange={(e) => setConfigGamesPerTeamOtherDiv(parseInt(e.target.value))}
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            width: '100%',
+            boxSizing: 'border-box',
+          }}
+        />
+      </div>
+
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'flex', alignItems: 'center', color: theme.text }}>
+          <input
+            type="checkbox"
+            checked={configAllowDoubleHeaders}
+            onChange={(e) => setConfigAllowDoubleHeaders(e.target.checked)}
+            style={{ marginRight: '10px', width: '18px', height: '18px', cursor: 'pointer' }}
+          />
+          Allow Double Headers
+        </label>
+      </div>
+
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'block', color: theme.text, marginBottom: '8px' }}>
+          Start Date:
+        </label>
+        <input
+          type="date"
+          value={configStartDate}
+          onChange={(e) => setConfigStartDate(e.target.value)}
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            width: '100%',
+            boxSizing: 'border-box',
+          }}
+        />
+      </div>
+
+      <div style={{ marginBottom: '30px' }}>
+        <label style={{ display: 'block', color: theme.text, marginBottom: '8px' }}>
+          End Date:
+        </label>
+        <input
+          type="date"
+          value={configEndDate}
+          onChange={(e) => setConfigEndDate(e.target.value)}
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            width: '100%',
+            boxSizing: 'border-box',
+          }}
+        />
+      </div>
+
+      <button
+        onClick={generateSchedule}
+        style={{
+          width: '100%',
+          padding: '15px',
+          backgroundColor: theme.highlight,
+          color: '#fff',
+          border: 'none',
+          borderRadius: '4px',
+          fontSize: '16px',
+          fontWeight: 'bold',
+          cursor: 'pointer',
+        }}
+      >
+        Generate Schedule
+      </button>
+    </div>
+  );
+
+  const renderSchedule = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Schedule</h2>
+
+      <div style={{ marginBottom: '20px' }}>
+        <select
+          value={selectedTeamFilter}
+          onChange={(e) => setSelectedTeamFilter(e.target.value)}
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+          }}
+        >
+          <option value="">All Teams</option>
+          {teams.map((team) => (
+            <option key={team.id} value={team.id}>
+              {team.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {schedule
+        .filter((game) => {
+          if (!selectedTeamFilter) return true;
+          return game.homeTeam === selectedTeamFilter || game.awayTeam === selectedTeamFilter;
+        })
+        .map((game) => {
+          const homeTeam = teams.find((t) => t.id === game.homeTeam);
+          const awayTeam = teams.find((t) => t.id === game.awayTeam);
+          const venue = venues.find((v) => v.id === game.venue);
+          const score = gameScores[game.id];
+          const dateStr = game.date.toLocaleDateString();
           return (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", background: "#F59E0B22", borderRadius: 8, border: "1px solid #F59E0B44" }}>
-              <Badge color={t1?.color} small>{t1?.name}</Badge>
-              <span style={{ fontSize: 11, color: theme.textMuted }}>vs</span>
-              <Badge color={t2?.color} small>{t2?.name}</Badge>
-              <button onClick={() => setRivalries(rivalries.filter((_, j) => j !== i))}
-                style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 14, fontWeight: 700, padding: 0 }}>×</button>
+            <div
+              key={game.id}
+              style={{
+                backgroundColor: theme.card,
+                border: `1px solid ${theme.cardBorder}`,
+                padding: '15px',
+                marginBottom: '10px',
+                borderRadius: '4px',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <p style={{ color: theme.textMuted, margin: '0 0 8px 0', fontSize: '12px' }}>
+                    {dateStr} • {game.timeSlot} • {venue ? venue.name : 'TBD'}
+                  </p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <span style={{ color: homeTeam?.color, fontWeight: 'bold', fontSize: '16px' }}>
+                      {homeTeam?.name}
+                    </span>
+                    <span style={{ color: theme.textMuted }}>
+                      {score?.homeScore !== undefined ? `${score.homeScore}` : '-'}
+                    </span>
+                    <span style={{ color: theme.textMuted }}>vs</span>
+                    <span style={{ color: theme.textMuted }}>
+                      {score?.awayScore !== undefined ? `${score.awayScore}` : '-'}
+                    </span>
+                    <span style={{ color: awayTeam?.color, fontWeight: 'bold', fontSize: '16px' }}>
+                      {awayTeam?.name}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    const newScore =
+                      score?.homeScore !== undefined
+                        ? { homeScore: undefined, awayScore: undefined, notes: '' }
+                        : { homeScore: 0, awayScore: 0, notes: '' };
+                    const newGameScores = { ...gameScores, [game.id]: newScore };
+                    setGameScores(newGameScores);
+                    const newState = {
+                      venues,
+                      teams,
+                      divisions,
+                      gameScores: newGameScores,
+                      schedule,
+                      referees,
+                      archivedSeasons,
+                    };
+                    saveState(newState);
+                  }}
+                  style={{
+                    padding: '8px 12px',
+                    backgroundColor: theme.highlight,
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {score?.homeScore !== undefined ? 'Edit' : 'Score'}
+                </button>
+              </div>
+
+              {score?.homeScore !== undefined && (
+                <div
+                  style={{
+                    marginTop: '15px',
+                    paddingTop: '15px',
+                    borderTop: `1px solid ${theme.cardBorder}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: '15px', marginBottom: '10px' }}>
+                    <div>
+                      <label style={{ color: theme.text, fontSize: '12px', display: 'block' }}>
+                        {homeTeam?.name} Score:
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={score.homeScore}
+                        onChange={(e) => {
+                          const newGameScores = {
+                            ...gameScores,
+                            [game.id]: {
+                              ...score,
+                              homeScore: parseInt(e.target.value),
+                            },
+                          };
+                          setGameScores(newGameScores);
+                        }}
+                        style={{
+                          padding: '5px',
+                          width: '80px',
+                          backgroundColor: theme.inputBg,
+                          color: theme.text,
+                          border: `1px solid ${theme.inputBorder}`,
+                          borderRadius: '4px',
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ color: theme.text, fontSize: '12px', display: 'block' }}>
+                        {awayTeam?.name} Score:
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={score.awayScore}
+                        onChange={(e) => {
+                          const newGameScores = {
+                            ...gameScores,
+                            [game.id]: {
+                              ...score,
+                              awayScore: parseInt(e.target.value),
+                            },
+                          };
+                          setGameScores(newGameScores);
+                        }}
+                        style={{
+                          padding: '5px',
+                          width: '80px',
+                          backgroundColor: theme.inputBg,
+                          color: theme.text,
+                          border: `1px solid ${theme.inputBorder}`,
+                          borderRadius: '4px',
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ color: theme.text, fontSize: '12px', display: 'block' }}>
+                      Notes:
+                    </label>
+                    <input
+                      type="text"
+                      value={score.notes || ''}
+                      onChange={(e) => {
+                        const newGameScores = {
+                          ...gameScores,
+                          [game.id]: {
+                            ...score,
+                            notes: e.target.value,
+                          },
+                        };
+                        setGameScores(newGameScores);
+                      }}
+                      style={{
+                        padding: '5px',
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        backgroundColor: theme.inputBg,
+                        color: theme.text,
+                        border: `1px solid ${theme.inputBorder}`,
+                        borderRadius: '4px',
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+      <div style={{ marginTop: '40px', paddingTop: '20px', borderTop: `2px solid ${theme.cardBorder}` }}>
+        <h3 style={{ color: theme.text }}>Game Density Heatmap</h3>
+        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+          {schedule.map((game, idx) => {
+            const completed = gameScores[game.id]?.homeScore !== undefined;
+            return (
+              <div
+                key={idx}
+                title={`Game ${idx + 1}: ${completed ? 'Completed' : 'Pending'}`}
+                style={{
+                  width: '30px',
+                  height: '30px',
+                  backgroundColor: completed ? theme.highlight : theme.card,
+                  border: `1px solid ${theme.cardBorder}`,
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                }}
+              />
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{ marginTop: '30px', paddingTop: '20px', borderTop: `2px solid ${theme.cardBorder}` }}>
+        <h3 style={{ color: theme.text }}>Venue Utilization</h3>
+        {venues.map((venue) => {
+          const venueGames = schedule.filter((g) => g.venue === venue.id);
+          const utilization = venues.length > 0 ? (venueGames.length / schedule.length) * 100 : 0;
+          return (
+            <div key={venue.id} style={{ marginBottom: '15px' }}>
+              <p style={{ color: theme.text, margin: '0 0 8px 0' }}>{venue.name}</p>
+              <div
+                style={{
+                  backgroundColor: theme.card,
+                  border: `1px solid ${theme.cardBorder}`,
+                  height: '20px',
+                  borderRadius: '4px',
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    backgroundColor: theme.highlight,
+                    height: '100%',
+                    width: `${utilization}%`,
+                    transition: 'width 0.3s',
+                  }}
+                />
+              </div>
+              <p style={{ color: theme.textMuted, fontSize: '12px', margin: '4px 0 0 0' }}>
+                {venueGames.length} games ({utilization.toFixed(1)}%)
+              </p>
             </div>
           );
         })}
       </div>
     </div>
   );
-}
 
-// ─── Tab: Configure ───
-function ConfigTab({ teams, venues, config, setConfig, onGenerate, divisions, theme }) {
-  const totalBase = (teams.length * (teams.length - 1)) / 2;
-  const multiplier = config.roundRobin === "double" ? 2 : 1;
-  let extraDiv = 0;
-  if (divisions.length > 0) {
-    divisions.forEach(d => {
-      const n = d.teamIds.length;
-      extraDiv += (n * (n - 1)) / 2 * multiplier;
-    });
-  }
-  const totalGames = totalBase * multiplier + extraDiv;
+  const renderStandings = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Standings</h2>
 
-  const addGlobalBlackout = (date) => {
-    if (date && !(config.blackoutDates || []).includes(date)) {
-      setConfig({ ...config, blackoutDates: [...(config.blackoutDates || []), date].sort() });
-    }
-  };
-
-  const [bdInput, setBdInput] = useState("");
-
-  return (
-    <div>
-      <h3 style={{ margin: "0 0 16px", fontSize: 18 }}>Schedule Settings</h3>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <div>
-          <label style={{ fontSize: 13, fontWeight: 600, color: theme.text }}>Start Date</label>
-          <Input type="date" value={config.startDate} onChange={v => setConfig({ ...config, startDate: v })} theme={theme} />
-        </div>
-        <div>
-          <label style={{ fontSize: 13, fontWeight: 600, color: theme.text }}>Max Games Per Day</label>
-          <Input type="number" value={config.gamesPerDay} onChange={v => setConfig({ ...config, gamesPerDay: Math.max(1, +v) })} theme={theme} />
-        </div>
-        <div>
-          <label style={{ fontSize: 13, fontWeight: 600, color: theme.text }}>Min Rest Days Between Games</label>
-          <Input type="number" value={config.minRestDays} onChange={v => setConfig({ ...config, minRestDays: Math.max(0, +v) })} theme={theme} />
-        </div>
-        <div>
-          <label style={{ fontSize: 13, fontWeight: 600, color: theme.text }}>Round Robin</label>
-          <Select value={config.roundRobin} onChange={v => setConfig({ ...config, roundRobin: v })} theme={theme} style={{ width: "100%" }}>
-            <option value="single">Single (each pair once)</option>
-            <option value="double">Double (home & away)</option>
-          </Select>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, gridColumn: "1 / -1" }}>
-          <input type="checkbox" checked={config.balanceHomeAway} onChange={e => setConfig({ ...config, balanceHomeAway: e.target.checked })} />
-          <label style={{ fontSize: 14 }}>Balance home/away games for each team</label>
-        </div>
+      <div style={{ overflowX: 'auto', marginBottom: '30px' }}>
+        <table
+          style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            backgroundColor: theme.card,
+            border: `1px solid ${theme.cardBorder}`,
+            borderRadius: '4px',
+          }}
+        >
+          <thead>
+            <tr style={{ backgroundColor: theme.headerBg }}>
+              <th style={{ padding: '12px', textAlign: 'left', color: theme.text, borderBottom: `2px solid ${theme.cardBorder}` }}>
+                Rank
+              </th>
+              <th style={{ padding: '12px', textAlign: 'left', color: theme.text, borderBottom: `2px solid ${theme.cardBorder}` }}>
+                Team
+              </th>
+              <th style={{ padding: '12px', textAlign: 'center', color: theme.text, borderBottom: `2px solid ${theme.cardBorder}` }}>
+                W
+              </th>
+              <th style={{ padding: '12px', textAlign: 'center', color: theme.text, borderBottom: `2px solid ${theme.cardBorder}` }}>
+                L
+              </th>
+              <th style={{ padding: '12px', textAlign: 'center', color: theme.text, borderBottom: `2px solid ${theme.cardBorder}` }}>
+                PCT
+              </th>
+              <th style={{ padding: '12px', textAlign: 'center', color: theme.text, borderBottom: `2px solid ${theme.cardBorder}` }}>
+                Streak
+              </th>
+              <th style={{ padding: '12px', textAlign: 'center', color: theme.text, borderBottom: `2px solid ${theme.cardBorder}` }}>
+                GB
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {standings.map((s, idx) => (
+              <tr
+                key={s.teamId}
+                style={{
+                  backgroundColor: idx % 2 === 0 ? theme.rowBg : theme.card,
+                  borderBottom: `1px solid ${theme.cardBorder}`,
+                }}
+              >
+                <td style={{ padding: '12px', color: theme.text }}>{idx + 1}</td>
+                <td style={{ padding: '12px', color: theme.text, fontWeight: 'bold' }}>
+                  {s.teamName}
+                </td>
+                <td style={{ padding: '12px', textAlign: 'center', color: theme.text }}>
+                  {s.wins}
+                </td>
+                <td style={{ padding: '12px', textAlign: 'center', color: theme.text }}>
+                  {s.losses}
+                </td>
+                <td style={{ padding: '12px', textAlign: 'center', color: theme.text }}>
+                  {s.pct}
+                </td>
+                <td style={{ padding: '12px', textAlign: 'center', color: theme.text }}>
+                  {s.streak}
+                </td>
+                <td style={{ padding: '12px', textAlign: 'center', color: theme.textMuted }}>
+                  {s.gb}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <label style={{ fontSize: 13, fontWeight: 600, color: theme.text }}>Global Blackout Dates</label>
-        <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-          {(config.blackoutDates || []).map(d => (
-            <span key={d} style={{ fontSize: 11, background: "#EF444422", color: "#EF4444", padding: "2px 8px", borderRadius: 6, display: "flex", alignItems: "center", gap: 4 }}>
-              {d}<button onClick={() => setConfig({ ...config, blackoutDates: config.blackoutDates.filter(x => x !== d) })}
-                style={{ background: "none", border: "none", color: "#EF4444", cursor: "pointer", fontSize: 12, fontWeight: 700, padding: 0 }}>×</button>
-            </span>
-          ))}
-        </div>
-        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-          <Input type="date" value={bdInput} onChange={setBdInput} theme={theme} style={{ width: 160 }} />
-          <Button variant="danger" onClick={() => { addGlobalBlackout(bdInput); setBdInput(""); }} style={{ fontSize: 12 }}>+ Blackout</Button>
-        </div>
-      </div>
-
-      <div style={{ marginTop: 20, padding: 16, background: theme.highlight, borderRadius: 8, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-        <div style={{ fontSize: 14 }}>
-          <strong>{teams.length}</strong> teams · <strong>{venues.length}</strong> venues · <strong>~{totalGames}</strong> games
-        </div>
-        <Button variant="success" onClick={onGenerate} disabled={teams.length < 2 || venues.length < 1} style={{ fontSize: 16, padding: "10px 28px" }}>
-          Generate Schedule
-        </Button>
+      <div style={{ backgroundColor: theme.card, border: `1px solid ${theme.cardBorder}`, padding: '15px', borderRadius: '4px' }}>
+        <h3 style={{ color: theme.text, margin: '0 0 15px 0' }}>Strength of Schedule</h3>
+        <p style={{ color: theme.textMuted, fontSize: '14px' }}>
+          Strength of schedule is calculated based on opponent win percentages
+        </p>
       </div>
     </div>
   );
-}
 
-// ─── Tab: Schedule View ───
-function ScheduleTab({ games, setGames, teams, venues, warning, theme }) {
-  const [view, setView] = useState("calendar");
-  const [teamFilter, setTeamFilter] = useState("");
-  const [swapSource, setSwapSource] = useState(null);
+  const renderTeamHub = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Team Hub</h2>
 
-  const teamMap = useMemo(() => Object.fromEntries(teams.map(tm => [tm.id, tm])), [teams]);
-  const venueMap = useMemo(() => Object.fromEntries(venues.map(v => [v.id, v])), [venues]);
-
-  const filtered = useMemo(() => {
-    if (!teamFilter) return games;
-    return games.filter(g => g.home === teamFilter || g.away === teamFilter);
-  }, [games, teamFilter]);
-
-  const byDate = useMemo(() => {
-    const map = {};
-    filtered.forEach(g => { if (!map[g.date]) map[g.date] = []; map[g.date].push(g); });
-    return Object.entries(map).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [filtered]);
-
-  // Conflict detection
-  const conflicts = useMemo(() => {
-    const set = new Set();
-    const byDateAll = {};
-    games.forEach(g => { if (!byDateAll[g.date]) byDateAll[g.date] = []; byDateAll[g.date].push(g); });
-    Object.values(byDateAll).forEach(dayGames => {
-      for (let i = 0; i < dayGames.length; i++) {
-        for (let j = i + 1; j < dayGames.length; j++) {
-          const a = dayGames[i], b = dayGames[j];
-          if (a.venue === b.venue && a.time === b.time) { set.add(a.id); set.add(b.id); }
-          if (a.home === b.home || a.home === b.away || a.away === b.home || a.away === b.away) { set.add(a.id); set.add(b.id); }
-        }
-      }
-    });
-    return set;
-  }, [games]);
-
-  // Stats
-  const stats = useMemo(() => {
-    const s = {};
-    teams.forEach(tm => { s[tm.id] = { home: 0, away: 0, total: 0, opponents: {} }; });
-    games.forEach(g => {
-      if (s[g.home]) { s[g.home].home++; s[g.home].total++; s[g.home].opponents[g.away] = (s[g.home].opponents[g.away] || 0) + 1; }
-      if (s[g.away]) { s[g.away].away++; s[g.away].total++; s[g.away].opponents[g.home] = (s[g.away].opponents[g.home] || 0) + 1; }
-    });
-    return s;
-  }, [games, teams]);
-
-  // Venue utilization
-  const venueUtil = useMemo(() => {
-    const u = {};
-    venues.forEach(v => { u[v.id] = 0; });
-    games.forEach(g => { if (u[g.venue] !== undefined) u[g.venue]++; });
-    return u;
-  }, [games, venues]);
-
-  // Strength of schedule
-  const sos = useMemo(() => {
-    const s = {};
-    teams.forEach(tm => {
-      const opps = stats[tm.id]?.opponents || {};
-      let totalOppWins = 0, totalOppGames = 0;
-      Object.keys(opps).forEach(oId => {
-        const opp = teams.find(x => x.id === oId);
-        if (opp) { totalOppWins += (opp.wins || 0); totalOppGames += (opp.wins || 0) + (opp.losses || 0); }
-      });
-      s[tm.id] = totalOppGames > 0 ? (totalOppWins / totalOppGames) : 0;
-    });
-    return s;
-  }, [teams, stats]);
-
-  const handleSwap = (game) => {
-    if (!swapSource) { setSwapSource(game.id); return; }
-    if (swapSource === game.id) { setSwapSource(null); return; }
-    // Swap dates, times, venues
-    setGames(games.map(g => {
-      if (g.id === swapSource) {
-        const target = games.find(x => x.id === game.id);
-        return { ...g, date: target.date, time: target.time, venue: target.venue, dayIndex: target.dayIndex };
-      }
-      if (g.id === game.id) {
-        const source = games.find(x => x.id === swapSource);
-        return { ...g, date: source.date, time: source.time, venue: source.venue, dayIndex: source.dayIndex };
-      }
-      return g;
-    }));
-    setSwapSource(null);
-  };
-
-  // Export CSV
-  const exportCSV = () => {
-    const rows = [["Date","Time","Home","Away","Venue","Rivalry"]];
-    games.forEach(g => rows.push([g.date, g.time || "", teamMap[g.home]?.name, teamMap[g.away]?.name, venueMap[g.venue]?.name, g.rivalry ? "Yes" : ""]));
-    const csv = rows.map(r => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "schedule.csv"; a.click();
-  };
-
-  // Export ICS
-  const exportICS = () => {
-    const lines = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//SportsScheduler//EN"];
-    games.forEach(g => {
-      const dt = g.date.replace(/-/g, "") + "T" + (g.time || "15:00").replace(":", "") + "00";
-      const endH = parseInt((g.time || "15:00").split(":")[0]) + 2;
-      const endDt = g.date.replace(/-/g, "") + "T" + String(endH).padStart(2, "0") + (g.time || "15:00").split(":")[1] + "00";
-      lines.push("BEGIN:VEVENT", `DTSTART:${dt}`, `DTEND:${endDt}`,
-        `SUMMARY:${teamMap[g.home]?.name} vs ${teamMap[g.away]?.name}`,
-        `LOCATION:${venueMap[g.venue]?.name || "TBD"}`,
-        `DESCRIPTION:${g.rivalry ? "RIVALRY GAME - " : ""}${teamMap[g.home]?.name} (Home) vs ${teamMap[g.away]?.name} (Away)`,
-        "END:VEVENT");
-    });
-    lines.push("END:VCALENDAR");
-    const blob = new Blob([lines.join("\r\n")], { type: "text/calendar" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "schedule.ics"; a.click();
-  };
-
-  // Shareable link
-  const shareLink = () => {
-    const data = { teams: teams.map(tm => ({ n: tm.name, c: tm.color })), venues: venues.map(v => v.name), games: games.map(g => ({ h: teams.findIndex(tm => tm.id === g.home), a: teams.findIndex(tm => tm.id === g.away), v: venues.findIndex(v => v.id === g.venue), d: g.date, t: g.time })) };
-    const encoded = btoa(encodeURIComponent(JSON.stringify(data)));
-    const url = window.location.href.split("?")[0] + "?schedule=" + encoded;
-    navigator.clipboard?.writeText(url);
-    alert("Schedule link copied to clipboard!");
-  };
-
-  if (games.length === 0) return <p style={{ color: theme.textMuted, textAlign: "center", padding: 40 }}>No schedule yet. Generate one from the Configure tab.</p>;
-
-  const maxVenueGames = Math.max(...Object.values(venueUtil), 1);
-
-  return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-        <h3 style={{ margin: 0, fontSize: 18 }}>Schedule ({filtered.length}{teamFilter ? ` of ${games.length}` : ""} games, {byDate.length} days)</h3>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {["calendar","stats","venues","sos"].map(v => (
-            <Button key={v} variant={view === v ? "primary" : "ghost"} onClick={() => setView(v)} style={{ fontSize: 12, padding: "5px 12px" }}>
-              {v === "calendar" ? "Calendar" : v === "stats" ? "Stats" : v === "venues" ? "Venues" : "Strength"}
-            </Button>
+      <div style={{ marginBottom: '20px' }}>
+        <select
+          value={selectedTeamFilter}
+          onChange={(e) => setSelectedTeamFilter(e.target.value)}
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            width: '100%',
+            maxWidth: '300px',
+          }}
+        >
+          <option value="">Select a Team</option>
+          {teams.map((team) => (
+            <option key={team.id} value={team.id}>
+              {team.name}
+            </option>
           ))}
-        </div>
+        </select>
       </div>
 
-      {/* Team filter */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, color: theme.textMuted }}>Filter:</span>
-        <button onClick={() => setTeamFilter("")}
-          style={{ padding: "3px 10px", borderRadius: 6, fontSize: 12, border: !teamFilter ? "2px solid #3B82F6" : "1px solid #D1D5DB",
-            background: !teamFilter ? "#3B82F622" : "transparent", cursor: "pointer", color: theme.text }}>All</button>
-        {teams.map(tm => (
-          <button key={tm.id} onClick={() => setTeamFilter(teamFilter === tm.id ? "" : tm.id)}
-            style={{ padding: "3px 10px", borderRadius: 6, fontSize: 12, cursor: "pointer", color: theme.text,
-              border: teamFilter === tm.id ? `2px solid ${tm.color}` : "1px solid #D1D5DB",
-              background: teamFilter === tm.id ? tm.color + "22" : "transparent" }}>{tm.name}</button>
-        ))}
-      </div>
+      {selectedTeamFilter && (
+        <>
+          {(() => {
+            const teamStats = standings.find((s) => s.teamId === selectedTeamFilter);
+            const homeGames = teamStats?.games.filter((g) => g.home) || [];
+            const awayGames = teamStats?.games.filter((g) => !g.home) || [];
+            const homeWins = homeGames.filter((g) => g.score > g.opponentScore).length;
+            const awayWins = awayGames.filter((g) => g.score > g.opponentScore).length;
 
-      {/* Export bar */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
-        <Button variant="ghost" onClick={exportCSV} style={{ fontSize: 12, padding: "4px 12px" }}>Export CSV</Button>
-        <Button variant="ghost" onClick={exportICS} style={{ fontSize: 12, padding: "4px 12px" }}>Export .ics (Calendar)</Button>
-        <Button variant="ghost" onClick={() => window.print()} style={{ fontSize: 12, padding: "4px 12px" }}>Print / PDF</Button>
-        <Button variant="ghost" onClick={shareLink} style={{ fontSize: 12, padding: "4px 12px" }}>Copy Share Link</Button>
-      </div>
+            return (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '30px' }}>
+                  <div
+                    style={{
+                      backgroundColor: theme.card,
+                      border: `1px solid ${theme.cardBorder}`,
+                      padding: '20px',
+                      borderRadius: '4px',
+                      textAlign: 'center',
+                    }}
+                  >
+                    <p style={{ color: theme.textMuted, margin: '0 0 10px 0', fontSize: '12px' }}>
+                      Record
+                    </p>
+                    <p style={{ color: theme.text, margin: 0, fontSize: '28px', fontWeight: 'bold' }}>
+                      {teamStats?.wins}-{teamStats?.losses}
+                    </p>
+                  </div>
+                  <div
+                    style={{
+                      backgroundColor: theme.card,
+                      border: `1px solid ${theme.cardBorder}`,
+                      padding: '20px',
+                      borderRadius: '4px',
+                      textAlign: 'center',
+                    }}
+                  >
+                    <p style={{ color: theme.textMuted, margin: '0 0 10px 0', fontSize: '12px' }}>
+                      Home
+                    </p>
+                    <p style={{ color: theme.text, margin: 0, fontSize: '28px', fontWeight: 'bold' }}>
+                      {homeWins}-{homeGames.length - homeWins}
+                    </p>
+                  </div>
+                  <div
+                    style={{
+                      backgroundColor: theme.card,
+                      border: `1px solid ${theme.cardBorder}`,
+                      padding: '20px',
+                      borderRadius: '4px',
+                      textAlign: 'center',
+                    }}
+                  >
+                    <p style={{ color: theme.textMuted, margin: '0 0 10px 0', fontSize: '12px' }}>
+                      Away
+                    </p>
+                    <p style={{ color: theme.text, margin: 0, fontSize: '28px', fontWeight: 'bold' }}>
+                      {awayWins}-{awayGames.length - awayWins}
+                    </p>
+                  </div>
+                </div>
 
-      {warning && <div style={{ background: theme.warning, border: `1px solid ${theme.warningBorder}`, borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 14 }}>{warning}</div>}
-
-      {swapSource && <div style={{ background: "#3B82F622", border: "1px solid #3B82F6", borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 13 }}>Click another game to swap schedules. <button onClick={() => setSwapSource(null)} style={{ background: "none", border: "none", color: "#3B82F6", cursor: "pointer", fontWeight: 700 }}>Cancel</button></div>}
-
-      {/* Calendar View */}
-      {view === "calendar" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {byDate.map(([date, dayGames]) => (
-            <div key={date}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: theme.textMuted, marginBottom: 8 }}>{dayLabel(date)}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {dayGames.map(g => {
-                  const isConflict = conflicts.has(g.id);
-                  const isSwapSrc = swapSource === g.id;
-                  return (
-                    <div key={g.id} onClick={() => handleSwap(g)}
-                      style={{
-                        display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
-                        background: isConflict ? "#FEE2E2" : isSwapSrc ? "#DBEAFE" : theme.rowBg,
-                        borderRadius: 8, fontSize: 14, cursor: "pointer",
-                        border: isConflict ? "2px solid #EF4444" : isSwapSrc ? "2px solid #3B82F6" : `1px solid ${theme.cardBorder}`,
-                        transition: "all 0.15s",
-                      }}>
-                      <span style={{ fontSize: 12, color: theme.textMuted, minWidth: 44 }}>{g.time || ""}</span>
-                      <Badge color={teamMap[g.home]?.color}>{teamMap[g.home]?.name}</Badge>
-                      <span style={{ color: theme.textMuted, fontWeight: 600 }}>vs</span>
-                      <Badge color={teamMap[g.away]?.color}>{teamMap[g.away]?.name}</Badge>
-                      {g.rivalry && <span style={{ fontSize: 10, background: "#F59E0B", color: "#fff", padding: "1px 6px", borderRadius: 4, fontWeight: 700 }}>RIVALRY</span>}
-                      {isConflict && <span style={{ fontSize: 10, background: "#EF4444", color: "#fff", padding: "1px 6px", borderRadius: 4, fontWeight: 700 }}>CONFLICT</span>}
-                      <span style={{ marginLeft: "auto", color: theme.textMuted, fontSize: 12 }}>@ {venueMap[g.venue]?.name}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Stats View */}
-      {view === "stats" && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-            <thead>
-              <tr style={{ borderBottom: `2px solid ${theme.cardBorder}` }}>
-                {["Team","Home","Away","Total","Balance"].map(h => <th key={h} style={{ textAlign: h === "Team" || h === "Balance" ? "left" : "center", padding: 10 }}>{h}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {teams.map(tm => {
-                const s = stats[tm.id] || { home: 0, away: 0, total: 0 };
-                const diff = s.home - s.away;
-                return (
-                  <tr key={tm.id} style={{ borderBottom: `1px solid ${theme.cardBorder}` }}>
-                    <td style={{ padding: 10 }}><Badge color={tm.color}>{tm.name}</Badge></td>
-                    <td style={{ textAlign: "center", padding: 10 }}>{s.home}</td>
-                    <td style={{ textAlign: "center", padding: 10 }}>{s.away}</td>
-                    <td style={{ textAlign: "center", padding: 10, fontWeight: 600 }}>{s.total}</td>
-                    <td style={{ padding: 10 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ width: 80, height: 8, background: theme.cardBorder, borderRadius: 4, overflow: "hidden" }}>
-                          <div style={{ width: `${s.total > 0 ? (s.home / s.total) * 100 : 50}%`, height: "100%", background: Math.abs(diff) <= 1 ? "#10B981" : "#F59E0B", borderRadius: 4 }} />
+                <h3 style={{ color: theme.text }}>Games</h3>
+                {schedule
+                  .filter(
+                    (game) =>
+                      game.homeTeam === selectedTeamFilter || game.awayTeam === selectedTeamFilter
+                  )
+                  .map((game) => {
+                    const homeTeam = teams.find((t) => t.id === game.homeTeam);
+                    const awayTeam = teams.find((t) => t.id === game.awayTeam);
+                    const score = gameScores[game.id];
+                    return (
+                      <div
+                        key={game.id}
+                        style={{
+                          backgroundColor: theme.card,
+                          border: `1px solid ${theme.cardBorder}`,
+                          padding: '15px',
+                          marginBottom: '10px',
+                          borderRadius: '4px',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <div>
+                            <p style={{ color: theme.text, margin: 0, fontWeight: 'bold' }}>
+                              {homeTeam?.name} vs {awayTeam?.name}
+                            </p>
+                            <p style={{ color: theme.textMuted, fontSize: '12px', margin: '5px 0 0 0' }}>
+                              {game.date.toLocaleDateString()}
+                            </p>
+                          </div>
+                          {score?.homeScore !== undefined && (
+                            <p style={{ color: theme.text, fontWeight: 'bold' }}>
+                              {score.homeScore} - {score.awayScore}
+                            </p>
+                          )}
                         </div>
-                        <span style={{ fontSize: 12, color: Math.abs(diff) <= 1 ? "#10B981" : "#F59E0B" }}>
-                          {diff === 0 ? "Even" : diff > 0 ? `+${diff} home` : `+${Math.abs(diff)} away`}
-                        </span>
                       </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                    );
+                  })}
+              </>
+            );
+          })()}
+        </>
       )}
+    </div>
+  );
 
-      {/* Venue Utilization */}
-      {view === "venues" && (
-        <div>
-          <h4 style={{ margin: "0 0 12px", fontSize: 15 }}>Venue Utilization</h4>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {venues.map(v => (
-              <div key={v.id} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <span style={{ fontSize: 14, width: 140, flexShrink: 0 }}>{v.name}</span>
-                <div style={{ flex: 1, height: 24, background: theme.cardBorder, borderRadius: 6, overflow: "hidden", position: "relative" }}>
-                  <div style={{ width: `${(venueUtil[v.id] / maxVenueGames) * 100}%`, height: "100%", background: "linear-gradient(90deg, #3B82F6, #8B5CF6)", borderRadius: 6, transition: "width 0.5s" }} />
-                  <span style={{ position: "absolute", right: 8, top: 3, fontSize: 12, fontWeight: 700, color: venueUtil[v.id] > maxVenueGames * 0.5 ? "#fff" : theme.text }}>
-                    {venueUtil[v.id]} games
+  const renderPlayoffs = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Playoffs</h2>
+      <p style={{ color: theme.textMuted, marginBottom: '20px' }}>
+        Division-based seeding for playoff competition
+      </p>
+
+      {divisions.map((division) => {
+        const divisionStandings = standings.filter((s) => {
+          const team = teams.find((t) => t.id === s.teamId);
+          return team?.division === division.id;
+        });
+
+        return (
+          <div
+            key={division.id}
+            style={{
+              backgroundColor: theme.card,
+              border: `1px solid ${theme.cardBorder}`,
+              padding: '20px',
+              marginBottom: '20px',
+              borderRadius: '4px',
+            }}
+          >
+            <h3 style={{ color: theme.text, margin: '0 0 15px 0' }}>{division.name}</h3>
+            {divisionStandings.map((s, idx) => (
+              <div
+                key={s.teamId}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  padding: '10px 0',
+                  borderBottom: idx < divisionStandings.length - 1 ? `1px solid ${theme.cardBorder}` : 'none',
+                }}
+              >
+                <span style={{ color: theme.text }}>
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: '30px',
+                      height: '30px',
+                      backgroundColor: theme.highlight,
+                      color: '#fff',
+                      borderRadius: '50%',
+                      textAlign: 'center',
+                      lineHeight: '30px',
+                      marginRight: '10px',
+                      fontWeight: 'bold',
+                      fontSize: '12px',
+                    }}
+                  >
+                    {idx + 1}
                   </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Strength of Schedule */}
-      {view === "sos" && (
-        <div>
-          <h4 style={{ margin: "0 0 4px", fontSize: 15 }}>Strength of Schedule</h4>
-          <p style={{ fontSize: 12, color: theme.textMuted, margin: "0 0 12px" }}>Based on opponents' win rate. Set team records in the Teams tab for accurate values.</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {[...teams].sort((a, b) => (sos[b.id] || 0) - (sos[a.id] || 0)).map((tm, i) => (
-              <div key={tm.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", background: theme.rowBg, borderRadius: 8 }}>
-                <span style={{ fontSize: 14, fontWeight: 700, color: theme.textMuted, width: 24 }}>#{i + 1}</span>
-                <Badge color={tm.color}>{tm.name}</Badge>
-                <div style={{ flex: 1, height: 10, background: theme.cardBorder, borderRadius: 5, overflow: "hidden" }}>
-                  <div style={{ width: `${(sos[tm.id] || 0) * 100}%`, height: "100%", background: sos[tm.id] > 0.5 ? "#EF4444" : "#10B981", borderRadius: 5 }} />
-                </div>
-                <span style={{ fontSize: 13, fontWeight: 600, minWidth: 50, textAlign: "right" }}>
-                  {((sos[tm.id] || 0) * 100).toFixed(1)}%
+                  {s.teamName}
+                </span>
+                <span style={{ color: theme.textMuted }}>
+                  {s.wins}-{s.losses}
                 </span>
               </div>
             ))}
           </div>
-        </div>
-      )}
+        );
+      })}
     </div>
   );
-}
 
-// ─── Tab: Playoffs ───
-function PlayoffsTab({ teams, theme }) {
-  const [bracket, setBracket] = useState([]);
-  const [seedByRecord, setSeedByRecord] = useState(true);
-  const [numTeams, setNumTeams] = useState(8);
+  const renderRefs = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Referees</h2>
 
-  const generate = () => {
-    const sorted = seedByRecord
-      ? [...teams].sort((a, b) => ((b.wins || 0) / Math.max(1, (b.wins || 0) + (b.losses || 0))) - ((a.wins || 0) / Math.max(1, (a.wins || 0) + (a.losses || 0))))
-      : teams;
-    setBracket(generatePlayoffBracket(sorted.slice(0, numTeams), seedByRecord));
-  };
-
-  const setWinner = (roundIdx, matchIdx, winnerId) => {
-    const newBracket = bracket.map(r => r.map(m => ({ ...m })));
-    newBracket[roundIdx][matchIdx].winner = winnerId;
-    // Advance winner
-    if (roundIdx + 1 < newBracket.length) {
-      const nextMatchIdx = Math.floor(matchIdx / 2);
-      const slot = matchIdx % 2 === 0 ? "team1" : "team2";
-      const winnerTeam = teams.find(tm => tm.id === winnerId) || { id: winnerId, name: "TBD", color: "#9CA3AF" };
-      newBracket[roundIdx + 1][nextMatchIdx][slot] = winnerTeam;
-    }
-    setBracket(newBracket);
-  };
-
-  const roundNames = ["Round 1", "Quarterfinals", "Semifinals", "Finals", "Championship"];
-
-  return (
-    <div>
-      <h3 style={{ margin: "0 0 12px", fontSize: 18 }}>Playoff Bracket</h3>
-      <div style={{ display: "flex", gap: 12, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
-        <div>
-          <label style={{ fontSize: 12, color: theme.textMuted }}>Teams in playoffs</label>
-          <Input type="number" value={numTeams} onChange={v => setNumTeams(Math.max(2, Math.min(teams.length, +v)))} theme={theme} style={{ width: 80 }} />
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input type="checkbox" checked={seedByRecord} onChange={e => setSeedByRecord(e.target.checked)} />
-          <label style={{ fontSize: 13 }}>Seed by record</label>
-        </div>
-        <Button variant="success" onClick={generate} disabled={teams.length < 2}>Generate Bracket</Button>
+      <div style={{ marginBottom: '20px', display: 'flex', gap: '10px' }}>
+        <input
+          type="text"
+          placeholder="Referee name"
+          id="refName"
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+            flex: 1,
+          }}
+        />
+        <select
+          id="refExperience"
+          style={{
+            padding: '10px',
+            backgroundColor: theme.inputBg,
+            color: theme.text,
+            border: `1px solid ${theme.inputBorder}`,
+            borderRadius: '4px',
+          }}
+        >
+          <option value="Beginner">Beginner</option>
+          <option value="Intermediate">Intermediate</option>
+          <option value="Expert">Expert</option>
+        </select>
+        <button
+          onClick={() => {
+            const name = document.getElementById('refName').value;
+            const experience = document.getElementById('refExperience').value;
+            if (name) {
+              const newRef = {
+                id: `r-${Date.now()}`,
+                name,
+                experience,
+              };
+              const newReferees = [...referees, newRef];
+              setReferees(newReferees);
+              document.getElementById('refName').value = '';
+              const newState = {
+                venues,
+                teams,
+                divisions,
+                gameScores,
+                schedule,
+                referees: newReferees,
+                archivedSeasons,
+              };
+              saveState(newState);
+            }
+          }}
+          style={{
+            padding: '10px 20px',
+            backgroundColor: theme.highlight,
+            color: '#fff',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+          }}
+        >
+          Add Referee
+        </button>
       </div>
 
-      {bracket.length === 0 && <p style={{ color: theme.textMuted, textAlign: "center", padding: 30 }}>Click "Generate Bracket" to create the playoff bracket.</p>}
-
-      {bracket.length > 0 && (
-        <div style={{ display: "flex", gap: 24, overflowX: "auto", padding: "10px 0" }}>
-          {bracket.map((round, rIdx) => (
-            <div key={rIdx} style={{ display: "flex", flexDirection: "column", justifyContent: "space-around", minWidth: 200, gap: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: theme.textMuted, textAlign: "center", marginBottom: 4 }}>
-                {roundNames[bracket.length - 1 - rIdx] || `Round ${rIdx + 1}`}
+      {referees.map((ref) => {
+        const gamesAssigned = schedule.filter((g) => g.referee === ref.id).length;
+        return (
+          <div
+            key={ref.id}
+            style={{
+              backgroundColor: theme.card,
+              border: `1px solid ${theme.cardBorder}`,
+              padding: '15px',
+              marginBottom: '10px',
+              borderRadius: '4px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h3 style={{ color: theme.text, margin: '0 0 8px 0' }}>{ref.name}</h3>
+                <p style={{ color: theme.textMuted, margin: '0', fontSize: '14px' }}>
+                  Experience: {ref.experience}
+                </p>
+                <p style={{ color: theme.textMuted, margin: '5px 0 0 0', fontSize: '12px' }}>
+                  Games: {gamesAssigned}
+                </p>
               </div>
-              {round.map((match, mIdx) => (
-                <div key={mIdx} style={{ border: `1px solid ${theme.cardBorder}`, borderRadius: 8, overflow: "hidden" }}>
-                  {[match.team1, match.team2].map((team, tIdx) => {
-                    if (!team) return (
-                      <div key={tIdx} style={{ padding: "10px 12px", background: theme.rowBg, fontSize: 13, color: theme.textMuted, borderBottom: tIdx === 0 ? `1px solid ${theme.cardBorder}` : "none" }}>
-                        TBD
-                      </div>
-                    );
-                    const isWinner = match.winner === team.id;
-                    const isLoser = match.winner && match.winner !== team.id;
-                    return (
-                      <div key={tIdx}
-                        onClick={() => !team.isBye && !isWinner && setWinner(rIdx, mIdx, team.id)}
-                        style={{
-                          padding: "10px 12px", display: "flex", alignItems: "center", gap: 8,
-                          background: isWinner ? team.color + "22" : theme.rowBg,
-                          borderBottom: tIdx === 0 ? `1px solid ${theme.cardBorder}` : "none",
-                          cursor: team.isBye ? "default" : "pointer",
-                          opacity: isLoser ? 0.4 : 1,
-                          borderLeft: isWinner ? `3px solid ${team.color}` : "3px solid transparent",
-                        }}>
-                        <span style={{ fontSize: 13, fontWeight: isWinner ? 700 : 500 }}>{team.name}</span>
-                        {isWinner && <span style={{ fontSize: 11, color: "#10B981", fontWeight: 700 }}>W</span>}
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-      {bracket.length > 0 && <p style={{ fontSize: 12, color: theme.textMuted, marginTop: 12 }}>Click a team name to advance them to the next round.</p>}
-    </div>
-  );
-}
-
-// ─── Demo Data ───
-function loadDemoData(setVenues, setTeams, setDivisions, setRivalries) {
-  const dv = [
-    { id: uid(), name: "Main Arena", timeSlots: ["17:00","19:00","21:00"], blackoutDates: [] },
-    { id: uid(), name: "Fieldhouse", timeSlots: ["15:00","17:00","19:00"], blackoutDates: [] },
-    { id: uid(), name: "Community Center", timeSlots: ["10:00","13:00","16:00"], blackoutDates: [] },
-    { id: uid(), name: "Dome Stadium", timeSlots: ["18:00","20:00"], blackoutDates: [] },
-  ];
-  const names = ["Eagles","Lions","Panthers","Wolves","Falcons","Bears","Hawks","Tigers","Sharks","Cobras","Vipers","Stallions","Coyotes","Rams","Jaguars","Bison"];
-  const dt = names.map((n, i) => ({
-    id: uid(), name: n, color: COLORS[i % COLORS.length],
-    preferredVenue: dv[i % dv.length].id, blackoutDates: [],
-    wins: Math.floor(Math.random() * 15), losses: Math.floor(Math.random() * 15),
-  }));
-  const div1 = { id: uid(), name: "East Conference", teamIds: dt.slice(0, 8).map(x => x.id) };
-  const div2 = { id: uid(), name: "West Conference", teamIds: dt.slice(8).map(x => x.id) };
-  const riv = [
-    { team1: dt[0].id, team2: dt[1].id },
-    { team1: dt[8].id, team2: dt[9].id },
-    { team1: dt[2].id, team2: dt[10].id },
-  ];
-  setVenues(dv); setTeams(dt); setDivisions([div1, div2]); setRivalries(riv);
-}
-
-// ─── Main App ───
-export default function SportsScheduler() {
-  const [dark, toggleDark] = useDarkMode();
-  const theme = t(dark);
-  const [tab, setTab] = useState("venues");
-  const [venues, setVenues] = useState([]);
-  const [teams, setTeams] = useState([]);
-  const [divisions, setDivisions] = useState([]);
-  const [rivalries, setRivalries] = useState([]);
-  const [config, setConfig] = useState({
-    startDate: new Date().toISOString().slice(0, 10),
-    gamesPerDay: 6, minRestDays: 1, balanceHomeAway: true,
-    roundRobin: "single", blackoutDates: [],
-  });
-  const [schedule, setSchedule] = useState([]);
-  const [warning, setWarning] = useState("");
-
-  const generate = useCallback(() => {
-    const result = optimizeSchedule(teams, venues, { ...config, divisions }, rivalries);
-    if (result.error) { setWarning(result.error); setSchedule([]); }
-    else { setSchedule(result.games); setWarning(result.warning || ""); setTab("schedule"); }
-  }, [teams, venues, config, divisions, rivalries]);
-
-  const tabs = [
-    { id: "venues", label: `Venues (${venues.length})` },
-    { id: "teams", label: `Teams (${teams.length})` },
-    { id: "divisions", label: "Divisions" },
-    { id: "config", label: "Configure" },
-    { id: "schedule", label: `Schedule${schedule.length ? ` (${schedule.length})` : ""}` },
-    { id: "playoffs", label: "Playoffs" },
-  ];
-
-  return (
-    <div style={{ minHeight: "100vh", background: theme.bg, fontFamily: "system-ui, -apple-system, sans-serif", color: theme.text, transition: "background 0.3s, color 0.3s" }}>
-      <div style={{ background: theme.headerBg, padding: "28px 24px 20px" }}>
-        <div style={{ maxWidth: 960, margin: "0 auto" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-            <div>
-              <h1 style={{ margin: 0, color: "#fff", fontSize: 26, fontWeight: 800 }}>Sports Schedule Optimizer</h1>
-              <p style={{ margin: "4px 0 0", color: "rgba(255,255,255,0.7)", fontSize: 14 }}>
-                Venues, teams, divisions, rivalries, time slots, blackout dates — fully optimized
-              </p>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Button variant="ghost" onClick={() => loadDemoData(setVenues, setTeams, setDivisions, setRivalries)}
-                style={{ color: "#fff", borderColor: "rgba(255,255,255,0.4)", fontSize: 13 }}>Load 16-team demo</Button>
-              <Button variant="ghost" onClick={toggleDark}
-                style={{ color: "#fff", borderColor: "rgba(255,255,255,0.4)", fontSize: 13 }}>{dark ? "Light Mode" : "Dark Mode"}</Button>
+              <button
+                onClick={() => {
+                  const newReferees = referees.filter((r) => r.id !== ref.id);
+                  setReferees(newReferees);
+                  const newState = {
+                    venues,
+                    teams,
+                    divisions,
+                    gameScores,
+                    schedule,
+                    referees: newReferees,
+                    archivedSeasons,
+                  };
+                  saveState(newState);
+                }}
+                style={{
+                  padding: '8px 12px',
+                  backgroundColor: theme.warning,
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                }}
+              >
+                Delete
+              </button>
             </div>
           </div>
-        </div>
-      </div>
+        );
+      })}
 
-      <div style={{ background: theme.tabBg, borderBottom: `1px solid ${theme.cardBorder}` }}>
-        <div style={{ maxWidth: 960, margin: "0 auto", display: "flex", gap: 0, overflowX: "auto" }}>
-          {tabs.map(tb => (
-            <button key={tb.id} onClick={() => setTab(tb.id)}
+      <h3 style={{ color: theme.text, marginTop: '30px' }}>Workload View</h3>
+      {referees.length === 0 ? (
+        <p style={{ color: theme.textMuted }}>No referees added yet</p>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px' }}>
+          {referees.map((ref) => {
+            const gamesAssigned = schedule.filter((g) => g.referee === ref.id).length;
+            const avgGames = schedule.length > 0 ? Math.floor(schedule.length / referees.length) : 0;
+            return (
+              <div
+                key={ref.id}
+                style={{
+                  backgroundColor: theme.card,
+                  border: `1px solid ${theme.cardBorder}`,
+                  padding: '15px',
+                  borderRadius: '4px',
+                }}
+              >
+                <p style={{ color: theme.text, fontWeight: 'bold', margin: 0 }}>{ref.name}</p>
+                <p style={{ color: theme.textMuted, fontSize: '12px', margin: '5px 0 0 0' }}>
+                  {gamesAssigned} / {avgGames} games
+                </p>
+                <div
+                  style={{
+                    backgroundColor: theme.rowBg,
+                    height: '8px',
+                    borderRadius: '4px',
+                    marginTop: '10px',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      backgroundColor: theme.highlight,
+                      height: '100%',
+                      width: `${avgGames > 0 ? (gamesAssigned / avgGames) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  const renderHistory = () => (
+    <div style={{ padding: '20px' }}>
+      <h2 style={{ color: theme.text }}>Season History</h2>
+
+      {archivedSeasons.length === 0 ? (
+        <p style={{ color: theme.textMuted }}>No archived seasons yet</p>
+      ) : (
+        <div>
+          {archivedSeasons.map((season) => (
+            <div
+              key={season.id}
               style={{
-                padding: "12px 18px", border: "none", background: "transparent",
-                borderBottom: tab === tb.id ? `3px solid ${theme.tabActive}` : "3px solid transparent",
-                fontWeight: tab === tb.id ? 700 : 500, fontSize: 14,
-                color: tab === tb.id ? theme.tabActive : theme.textMuted,
-                cursor: "pointer", transition: "all 0.15s", whiteSpace: "nowrap",
-              }}>{tb.label}</button>
+                backgroundColor: theme.card,
+                border: `1px solid ${theme.cardBorder}`,
+                padding: '15px',
+                marginBottom: '10px',
+                borderRadius: '4px',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <h3 style={{ color: theme.text, margin: 0 }}>
+                    {new Date(season.date).toLocaleDateString()}
+                  </h3>
+                  <p style={{ color: theme.textMuted, margin: '5px 0 0 0', fontSize: '14px' }}>
+                    {season.completedGames.length} games played
+                  </p>
+                </div>
+                <button
+                  style={{
+                    padding: '8px 12px',
+                    backgroundColor: theme.highlight,
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  View Details
+                </button>
+              </div>
+            </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+
+  // Main render
+  return (
+    <div style={{ backgroundColor: theme.bg, color: theme.text, minHeight: '100vh' }}>
+      {/* Header */}
+      <div
+        style={{
+          backgroundColor: theme.headerBg,
+          borderBottom: `1px solid ${theme.cardBorder}`,
+          padding: '15px 20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}
+      >
+        <h1 style={{ color: theme.text, margin: 0, fontSize: '24px' }}>Sports Schedule Optimizer</h1>
+
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <button
+            onClick={handleUndo}
+            disabled={historyIndex <= 0}
+            title="Undo"
+            style={{
+              padding: '8px 12px',
+              backgroundColor: historyIndex <= 0 ? theme.card : theme.highlight,
+              color: historyIndex <= 0 ? theme.textMuted : '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: historyIndex <= 0 ? 'default' : 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            ↶
+          </button>
+
+          <button
+            onClick={handleRedo}
+            disabled={historyIndex >= stateHistory.length - 1}
+            title="Redo"
+            style={{
+              padding: '8px 12px',
+              backgroundColor: historyIndex >= stateHistory.length - 1 ? theme.card : theme.highlight,
+              color: historyIndex >= stateHistory.length - 1 ? theme.textMuted : '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: historyIndex >= stateHistory.length - 1 ? 'default' : 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            ↷
+          </button>
+
+          <button
+            onClick={handleExport}
+            title="Export"
+            style={{
+              padding: '8px 12px',
+              backgroundColor: theme.highlight,
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            Export
+          </button>
+
+          <label
+            title="Import"
+            style={{
+              padding: '8px 12px',
+              backgroundColor: theme.highlight,
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px',
+              display: 'inline-block',
+            }}
+          >
+            Import
+            <input
+              type="file"
+              accept=".json"
+              onChange={handleImport}
+              style={{ display: 'none' }}
+            />
+          </label>
+
+          <button
+            onClick={() => setDark(!dark)}
+            title="Dark Mode"
+            style={{
+              padding: '8px 12px',
+              backgroundColor: theme.highlight,
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            {dark ? '☀️' : '🌙'}
+          </button>
+
+          <button
+            onClick={handleArchiveSeason}
+            title="Archive Season"
+            style={{
+              padding: '8px 12px',
+              backgroundColor: theme.warning,
+              color: '#fff',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            Archive
+          </button>
+        </div>
       </div>
 
-      <div style={{ maxWidth: 960, margin: "24px auto", padding: "0 16px" }}>
-        <Card theme={theme}>
-          {tab === "venues" && <VenuesTab venues={venues} setVenues={setVenues} theme={theme} />}
-          {tab === "teams" && <TeamsTab teams={teams} setTeams={setTeams} venues={venues} theme={theme} />}
-          {tab === "divisions" && <DivisionsTab teams={teams} divisions={divisions} setDivisions={setDivisions} rivalries={rivalries} setRivalries={setRivalries} theme={theme} />}
-          {tab === "config" && <ConfigTab teams={teams} venues={venues} config={config} setConfig={setConfig} onGenerate={generate} divisions={divisions} theme={theme} />}
-          {tab === "schedule" && <ScheduleTab games={schedule} setGames={setSchedule} teams={teams} venues={venues} warning={warning} theme={theme} />}
-          {tab === "playoffs" && <PlayoffsTab teams={teams} theme={theme} />}
-        </Card>
+      {/* Tabs */}
+      <div
+        style={{
+          backgroundColor: theme.headerBg,
+          borderBottom: `1px solid ${theme.cardBorder}`,
+          display: 'flex',
+          overflow: 'x auto',
+          padding: '0 20px',
+          gap: '2px',
+        }}
+      >
+        {[
+          { id: 'welcome', label: '🏠 Welcome' },
+          { id: 'venues', label: '🏟️ Venues' },
+          { id: 'teams', label: '👥 Teams' },
+          { id: 'divisions', label: '📊 Divisions' },
+          { id: 'configure', label: '⚙️ Configure' },
+          { id: 'schedule', label: '📅 Schedule' },
+          { id: 'standings', label: '🏆 Standings' },
+          { id: 'team-hub', label: '👤 Team Hub' },
+          { id: 'playoffs', label: '🎯 Playoffs' },
+          { id: 'refs', label: '👨‍⚖️ Refs' },
+          { id: 'history', label: '📚 History' },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              padding: '15px 20px',
+              backgroundColor: activeTab === tab.id ? theme.tabActive : 'transparent',
+              color: activeTab === tab.id ? '#fff' : theme.text,
+              border: 'none',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              fontWeight: activeTab === tab.id ? 'bold' : 'normal',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        {activeTab === 'welcome' && renderWelcome()}
+        {activeTab === 'venues' && renderVenues()}
+        {activeTab === 'teams' && renderTeams()}
+        {activeTab === 'divisions' && renderDivisions()}
+        {activeTab === 'configure' && renderConfigure()}
+        {activeTab === 'schedule' && renderSchedule()}
+        {activeTab === 'standings' && renderStandings()}
+        {activeTab === 'team-hub' && renderTeamHub()}
+        {activeTab === 'playoffs' && renderPlayoffs()}
+        {activeTab === 'refs' && renderRefs()}
+        {activeTab === 'history' && renderHistory()}
       </div>
     </div>
   );
-}
+};
+
+export default SportsScheduleOptimizer;
